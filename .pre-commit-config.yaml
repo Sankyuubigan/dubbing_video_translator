@@ -1,0 +1,10 @@
+repos:
+-   repo: local
+    hooks:
+    -   id: requirements
+        name: requirements
+        entry: bash -c '${PYTHON_EXE:-python} -m pip freeze > requirements.txt && git add requirements.txt'
+        language: system
+        pass_filenames: false
+        always_run: true # Запускать всегда, даже если нет измененных python файлов
+        stages: [commit]
