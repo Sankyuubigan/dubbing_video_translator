@@ -2,9 +2,53 @@ repos:
 -   repo: local
     hooks:
     -   id: requirements
-        name: requirements
-        entry: bash -c '${PYTHON_EXE:-python} -m pip freeze > requirements.txt && git add requirements.txt'
+        name: Generate requirements.txt
+        # Используем | для более буквальной многострочности в YAML,
+        # и убедимся, что bash видит скрипт правильно.
+        entry: |
+            bash -c '
+            set -ex # Выход при ошибке и печать команд
+
+            echo "--- Debugging requirements.txt hook ---"
+            echo "Current working directory:"
+            pwd
+            
+            # Присваиваем переменной путь
+            TARGET_PYTHON="./.venv/Scripts/python.exe"
+
+            echo "Assigned TARGET_PYTHON is: ${TARGET_PYTHON}"
+
+            echo "Listing TARGET_PYTHON with ls -la:"
+            ls -la "${TARGET_PYTHON}"
+
+            echo "Attempting to execute: ${TARGET_PYTHON} --version"
+            
+            # Попытка запуска
+            if ! "${TARGET_PYTHON}" --version > /dev/null 2>&1; then
+                echo "Error: Command '\''${TARGET_PYTHON} --version'\'' failed."
+                echo "Exit code of the command was: $?"
+                
+                if [ -f "${TARGET_PYTHON}" ]; then
+                    echo "Bash check: File '\''${TARGET_PYTHON}'\'' exists."
+                    if [ -x "${TARGET_PYTHON}" ]; then
+                        echo "Bash check: File '\''${TARGET_PYTHON}'\'' is executable."
+                    else
+                        echo "Bash check: File '\''${TARGET_PYTHON}'\'' is NOT executable."
+                    fi
+                else
+                    echo "Bash check: File '\''${TARGET_PYTHON}'\'' does NOT exist (checked after failure)."
+                fi
+
+                echo "Please ensure .venv is in the project root and contains an executable Scripts/python.exe"
+                exit 1
+            fi
+
+            echo "Python found and executable. Using: ${TARGET_PYTHON}"
+            "${TARGET_PYTHON}" -m pip freeze --local > requirements.txt && git add requirements.txt
+            echo "requirements.txt generated and added."
+            echo "---------------------------------------"
+            '
         language: system
         pass_filenames: false
-        always_run: true # Запускать всегда, даже если нет измененных python файлов
-        stages: [commit]
+        always_run: true
+        stages: [pre-commit]
