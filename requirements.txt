@@ -162,11 +162,12 @@ tensorboardX==2.6.2.2
 thinc==8.3.4
 threadpoolctl==3.6.0
 tokenizers==0.21.1
-torch==2.7.0
+torch==2.7.0+cu128
 torch-audiomentations==0.12.0
 torch_pitch_shift==1.2.5
-torchaudio==2.7.0
+torchaudio==2.7.0+cu128
 torchmetrics==1.7.1
+torchvision==0.22.0+cu128
 tqdm==4.67.1
 trainer==0.0.36
 transformers==4.51.3
