@@ -31,22 +31,23 @@ def translate_segments(segments, target_language="ru"):
     if translator_pipeline is None: raise RuntimeError("Translation model could not be loaded.")
 
     print(f"Translating {len(segments)} segments to {target_language}...")
-    texts_to_translate = [segment['text'] for segment in segments if segment.get('text')]
+    texts_to_translate = [segment['text'] for segment in segments if segment.get('text','').strip()]
     if not texts_to_translate:
-        print("No text found to translate.")
+        print("No text found in segments to translate.")
         for segment in segments: segment['translated_text'] = segment.get('text', "")
         return segments
 
     start_time_trans = time.time()
     try:
-        translations = translator_pipeline(texts_to_translate, max_length=512)
+        # Увеличим max_length, если тексты могут быть длинными, но это может потребовать больше памяти
+        translations = translator_pipeline(texts_to_translate, max_length=512, truncation=True)
     except Exception as e:
         print(f"Error during batch translation: {e}. Falling back to one-by-one.")
         translations = []
         for i, text_segment in enumerate(texts_to_translate):
             print(f"Translating segment {i+1}/{len(texts_to_translate)} individually...")
             try:
-                translation_result = translator_pipeline(text_segment, max_length=512)
+                translation_result = translator_pipeline(text_segment, max_length=512, truncation=True)
                 translations.append(translation_result[0])
             except Exception as e_single:
                  print(f"Error translating segment: {text_segment[:50]}... Error: {e_single}")
@@ -55,14 +56,24 @@ def translate_segments(segments, target_language="ru"):
     end_time_trans = time.time()
     print(f"Translation of {len(texts_to_translate)} texts took {end_time_trans - start_time_trans:.2f} seconds.")
 
-    translation_map = {orig_text: trans['translation_text'] for orig_text, trans in zip(texts_to_translate, translations)}
+    # Сопоставляем переводы с оригинальными текстами для правильного присвоения
+    # Это важно, т.к. texts_to_translate мог быть отфильтрован от пустых
+    translated_text_iter = iter(translations)
     translated_segments_list = []
     for segment in segments:
         new_segment = segment.copy()
-        original_text = segment.get('text')
+        original_text = segment.get('text', '').strip()
         if original_text:
-            translated_text = translation_map.get(original_text, f"[Translation Missing: {original_text[:30]}...]")
-            new_segment['translated_text'] = translated_text
+            try:
+                # Берем следующий перевод из итератора
+                new_segment['translated_text'] = next(translated_text_iter)['translation_text']
+            except StopIteration:
+                 # Этого не должно случиться, если texts_to_translate и translations имеют одинаковую длину
+                 print(f"Warning: Ran out of translations for segment with original text: {original_text[:30]}...")
+                 new_segment['translated_text'] = "[Translation Missing]"
+            except KeyError:
+                 print(f"Warning: 'translation_text' key missing for segment with original text: {original_text[:30]}...")
+                 new_segment['translated_text'] = "[Translation Error]"
         else:
             new_segment['translated_text'] = ""
         translated_segments_list.append(new_segment)
