@@ -1,6 +1,9 @@
 ctranslate2==4.6.0
 ffmpeg_python==0.2.0
+soundfile==0.13.1
 torch==2.7.0+cu128
+torchaudio==2.7.0+cu128
+tqdm==4.67.1
 transformers==4.51.3
 tts==0.22.0
 whisperx==3.3.2
