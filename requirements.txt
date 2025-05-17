@@ -1,9 +1,21 @@
-ctranslate2==4.6.0
-ffmpeg_python==0.2.0
-soundfile==0.13.1
-torch==2.7.0+cu128
-torchaudio==2.7.0+cu128
-tqdm==4.67.1
-transformers==4.51.3
-tts==0.22.0
-whisperx==3.3.2
+# Основные ML/TTS/транскрипция
+torch
+torchaudio
+tts >= 0.22.0
+whisperx >= 3.1.0
+pyannote.audio >= 3.0.0 
+transformers >= 4.0.0
+
+# Обработка видео/аудио
+ffmpeg-python
+
+# Скачивание с YouTube
+yt-dlp
+
+# Вспомогательные
+soundfile 
+tqdm 
+srt >= 3.5.0 # Для парсинга SRT файлов, указана минимальная версия
+
+# Для dev (управляется pre-commit)
+# pipreqs
