@@ -16,6 +16,8 @@ yt-dlp
 soundfile 
 tqdm 
 srt >= 3.5.0 # Для парсинга SRT файлов, указана минимальная версия
+pyperclip # Для копирования в буфер обмена
+langdetect # Для определения языка текста
 
 # Для dev (управляется pre-commit)
 # pipreqs

@@ -2,13 +2,16 @@ import ffmpeg
 import subprocess
 import os
 import shutil
+import traceback 
+
 try:
     import yt_dlp
+    from yt_dlp.utils import OUTTMPL_TYPES 
 except ImportError:
     yt_dlp = None
+    OUTTMPL_TYPES = () 
 
-def check_command_availability(command):
-    # ... (без изменений)
+def check_command_availability(command): # ... (без изменений) ...
     try:
         command_path = shutil.which(command)
         if command_path is None: return False, f"'{command}' not found in PATH."
@@ -36,8 +39,7 @@ def check_command_availability(command):
              return False, f"'{command}' found but execution failed. Error: {last_err_msg}"
     except Exception as e: return False, f"Error checking command '{command}': {e}"
 
-def extract_audio(video_path, output_audio_path, sample_rate=16000):
-    # ... (без изменений)
+def extract_audio(video_path, output_audio_path, sample_rate=16000): # ... (без изменений) ...
     try:
         (ffmpeg.input(video_path).output(output_audio_path, format='wav', acodec='pcm_s16le', ac=1, ar=str(sample_rate))
          .overwrite_output().run(capture_stdout=True, capture_stderr=True))
@@ -47,8 +49,7 @@ def extract_audio(video_path, output_audio_path, sample_rate=16000):
         raise RuntimeError(f"Audio extraction failed: {stderr}") from e
     except Exception as e: print(f"ERROR: An unexpected error occurred during audio extraction: {e}"); raise
 
-def merge_audio_segments(segment_files, output_path):
-    # ... (без изменений)
+def merge_audio_segments(segment_files, output_path): # ... (без изменений) ...
     print(f"Merging {len(segment_files)} audio segments into {os.path.basename(output_path)}")
     if not segment_files: raise ValueError("No segment files provided for merging.")
     temp_dir = os.path.dirname(output_path); list_filename = os.path.join(temp_dir, "concat_list.txt"); output_stream = None
@@ -67,7 +68,6 @@ def merge_audio_segments(segment_files, output_path):
                 .overwrite_output().run(capture_stdout=True, capture_stderr=True))
             if os.path.exists(list_filename): os.remove(list_filename)
             return output_path
-
         output_options = {'acodec': 'copy'}
         output_stream = (ffmpeg.input(list_filename, f='concat', safe=0).output(output_path, **output_options).overwrite_output())
         _stdout, stderr = output_stream.run(capture_stdout=True, capture_stderr=True)
@@ -100,23 +100,19 @@ def merge_audio_segments(segment_files, output_path):
             except OSError as e_rem: print(f"Warning: Could not remove temporary concat list file {os.path.basename(list_filename)}: {e_rem}")
     return output_path
 
-def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, output_path, original_volume=0.1, dubbed_volume=1.0):
-    # ... (без изменений)
+def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, output_path, original_volume=0.1, dubbed_volume=1.0): # ... (без изменений) ...
     output_stream = None
     try:
         input_video = ffmpeg.input(video_path); input_original_audio = ffmpeg.input(original_audio_path); input_dubbed_audio = ffmpeg.input(dubbed_audio_path)
         video_stream = input_video['v']
-        
         has_audio_in_video = False
         try:
             probe = ffmpeg.probe(video_path)
             if any(stream.get('codec_type') == 'audio' for stream in probe.get('streams', [])):
                 has_audio_in_video = True
-        except ffmpeg.Error:
-            print(f"Warning: Could not probe video {video_path} for audio streams.")
-
+        except ffmpeg.Error: print(f"Warning: Could not probe video {video_path} for audio streams.")
         if not os.path.exists(dubbed_audio_path) or os.path.getsize(dubbed_audio_path) == 0:
-            print(f"Warning: Dubbed audio file {dubbed_audio_path} is missing or empty. Using original audio only.")
+            print(f"Warning: Dubbed audio file {dubbed_audio_path} is missing or empty. Using original audio only (if video has it).")
             if has_audio_in_video and os.path.exists(original_audio_path) and os.path.getsize(original_audio_path) > 0:
                  audio_to_use = ffmpeg.filter(input_original_audio, 'volume', str(original_volume))
                  output_options = {'vcodec': 'copy', 'acodec': 'aac', 'audio_bitrate': '192k', 'strict': '-2'}
@@ -133,7 +129,6 @@ def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, ou
             mixed_audio = ffmpeg.filter([input_original_audio, input_dubbed_audio], 'amix', inputs=2, duration='first', dropout_transition=2, weights=f"{original_volume} {dubbed_volume}")
             output_options = {'vcodec': 'copy', 'acodec': 'aac', 'audio_bitrate': '192k', 'strict': '-2'}
             output_stream = ffmpeg.output(video_stream, mixed_audio, output_path, **output_options).overwrite_output()
-        
         output_stream.run(capture_stdout=True, capture_stderr=True)
     except ffmpeg.Error as e:
         print("ERROR: ffmpeg video assembly failed."); stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
@@ -142,10 +137,10 @@ def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, ou
         raise RuntimeError(f"Video assembly failed. FFmpeg stderr:\n{stderr}") from e
     except Exception as e: print(f"ERROR: An unexpected error occurred during video assembly: {e}"); raise
 
-def escape_ffmpeg_path(path): # ... (без изменений)
+def escape_ffmpeg_path(path): # ... (без изменений) ...
     path = path.replace('\\', '/'); path = path.replace(':', '\\:').replace("'", "'\\''"); return path
 
-def add_subtitles(video_path, srt_path, output_path): # ... (без изменений)
+def add_subtitles(video_path, srt_path, output_path): # ... (без изменений) ...
     output_stream = None
     try:
         style_options = "FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=1"
@@ -161,226 +156,190 @@ def add_subtitles(video_path, srt_path, output_path): # ... (без измене
     except Exception as e: print(f"ERROR: An unexpected error occurred during subtitle adding: {e}"); raise
 
 def _attempt_yt_dlp_download(ydl_opts, url):
-    # ... (без изменений по сравнению с v0.6.1)
     if yt_dlp is None: raise ImportError("yt-dlp library is not available but is required for this function.")
-    downloaded_files = []
     
-    def download_hook(d):
-        if d['status'] == 'finished':
-            filepath = d.get('filename') or d.get('info_dict', {}).get('_filename')
-            if filepath and filepath not in downloaded_files:
-                 downloaded_files.append(filepath)
-            
+    downloaded_files_from_hook = [] 
+    
+    current_ydl_opts = ydl_opts.copy()
+    current_ydl_opts['verbose'] = True 
+    current_ydl_opts['quiet'] = False
+    current_ydl_opts['no_warnings'] = False
+
+    # current_output_dir берется из ydl_opts['outtmpl'], который должен быть строкой с полным путем
+    # outtmpl_setting извлекается из словаря ydl_opts
+    outtmpl_setting_from_opts = current_ydl_opts.get('outtmpl')
+    
+    # Определяем effective_outtmpl_str как строку
+    if isinstance(outtmpl_setting_from_opts, dict) and 'default' in outtmpl_setting_from_opts and isinstance(outtmpl_setting_from_opts['default'], str):
+        effective_outtmpl_str = outtmpl_setting_from_opts['default']
+    elif isinstance(outtmpl_setting_from_opts, str):
+        effective_outtmpl_str = outtmpl_setting_from_opts
+    else:
+        print(f"  yt-dlp: CRITICAL - outtmpl has unexpected type/structure: {outtmpl_setting_from_opts}. Cannot determine output directory.")
+        # Это не должно происходить, так как мы формируем outtmpl как строку в download_youtube_video
+        # Но на всякий случай, если это произойдет, используем заглушку
+        effective_outtmpl_str = os.path.join('.', '%(title)s.%(id)s.%(ext)s') 
+
+    current_output_dir = os.path.dirname(effective_outtmpl_str)
+    if not os.path.isabs(current_output_dir) and current_output_dir : 
+        current_output_dir = os.path.abspath(current_output_dir)
+    elif not current_output_dir : 
+        current_output_dir = os.path.abspath('.') 
+    
+    # print(f"  yt-dlp: Determined current_output_dir for download: {current_output_dir}")
+
+    def ytdlp_hook(d): # ... (без изменений) ...
+        status = d.get('status'); filename_hook = d.get('filename', d.get('info_dict', {}).get('_filename'))
+        if status == 'downloading':
+            progress_str = d.get('_percent_str', d.get('_total_bytes_str', '')); speed_str = d.get('_speed_str', ''); eta_str = d.get('_eta_str', '')
+            if filename_hook: print(f"  yt-dlp: Downloading {os.path.basename(filename_hook)}: {progress_str} ({speed_str}, ETA: {eta_str})")
+        elif status == 'finished':
+            if filename_hook:
+                if filename_hook not in downloaded_files_from_hook: downloaded_files_from_hook.append(filename_hook)
             requested_subs = d.get('info_dict', {}).get('requested_subtitles')
             if requested_subs:
                 for lang_code, sub_info in requested_subs.items():
                     sub_filepath = sub_info.get('filepath')
-                    if sub_filepath and os.path.exists(sub_filepath) and sub_filepath not in downloaded_files:
-                        downloaded_files.append(sub_filepath)
-    
-    current_ydl_opts = ydl_opts.copy()
-    current_ydl_opts['progress_hooks'] = [download_hook]
+                    if sub_filepath and os.path.exists(sub_filepath) and sub_filepath not in downloaded_files_from_hook: downloaded_files_from_hook.append(sub_filepath)
+        elif status == 'error':
+            if filename_hook: print(f"  yt-dlp: Error downloading (hook): {os.path.basename(filename_hook)}.")
+
+    current_ydl_opts['progress_hooks'] = [ytdlp_hook]
     current_ydl_opts['ignoreerrors'] = current_ydl_opts.get('ignoreerrors', True) 
 
+    info_dict_after_download = None
+    main_video_file_path = None
+
     with yt_dlp.YoutubeDL(current_ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=not current_ydl_opts.get('skip_download', False))
-        
-        main_video_file = None
-        if not current_ydl_opts.get('skip_download', False):
-            main_video_file = ydl.prepare_filename(info) 
-            if not (main_video_file and os.path.exists(main_video_file)):
-                 for f_path in downloaded_files:
-                     # Проверяем по расширению, которое yt-dlp должен был использовать для видео
-                     # yt-dlp может вернуть info['ext'] или info_dict.get('ext')
-                     video_ext = info.get('ext')
-                     if video_ext and f_path.lower().endswith(f".{video_ext.lower()}"):
-                         main_video_file = f_path
-                         break
-            if main_video_file and main_video_file not in downloaded_files:
-                 downloaded_files.insert(0, main_video_file)
+        try:
+            info_dict_after_download = ydl.extract_info(url, download=not current_ydl_opts.get('skip_download', False))
+            if not current_ydl_opts.get('skip_download', False) and info_dict_after_download:
+                final_path_from_info = info_dict_after_download.get('filepath') or \
+                                       info_dict_after_download.get('_filename') 
+                if final_path_from_info and os.path.exists(final_path_from_info):
+                    main_video_file_path = final_path_from_info
+                else:
+                    try:
+                        expected_final_path = ydl.prepare_filename(info_dict_after_download)
+                        if expected_final_path and os.path.exists(expected_final_path):
+                            main_video_file_path = expected_final_path
+                    except Exception as e_prep_fn:
+                        print(f"  yt-dlp: Error calling ydl.prepare_filename: {e_prep_fn}. Trying manual construction based on '{current_output_dir}'.")
+                        video_title = info_dict_after_download.get('title', 'video'); video_id = info_dict_after_download.get('id', 'unknown_id')
+                        file_extension = info_dict_after_download.get('ext', 'mp4')
+                        safe_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '_', '-')).rstrip()
+                        manually_constructed_filename = f"{safe_title}.{video_id}.{file_extension}"
+                        manually_constructed_path = os.path.join(current_output_dir, manually_constructed_filename)
+                        if os.path.exists(manually_constructed_path):
+                            main_video_file_path = manually_constructed_path
+                if not main_video_file_path:
+                    video_exts = ('.mp4', '.mkv', '.webm', '.flv', '.avi', '.mov')
+                    for f_path_hook in downloaded_files_from_hook:
+                        if f_path_hook.lower().endswith(video_exts):
+                            try: 
+                                probe_test = ffmpeg.probe(f_path_hook)
+                                if any(s.get('codec_type') == 'video' for s in probe_test.get('streams',[])):
+                                    main_video_file_path = f_path_hook; break
+                            except Exception: pass
+                if main_video_file_path and main_video_file_path not in downloaded_files_from_hook:
+                     downloaded_files_from_hook.append(main_video_file_path)
+            elif current_ydl_opts.get('skip_download', False):
+                 print(f"  yt-dlp: Video download was skipped.")
+        except yt_dlp.utils.DownloadError as e_dl_err: print(f"  yt-dlp: DownloadError occurred: {e_dl_err}")
+        except Exception as e_generic: print(f"  yt-dlp: Generic exception during extract_info for URL '{url}': {e_generic}\n{traceback.format_exc()}")
+    return main_video_file_path, info_dict_after_download, downloaded_files_from_hook
 
-        return main_video_file, info, downloaded_files
-
-
-def _get_subtitle_path(info_dict, lang_code_to_find, video_filepath_no_ext, downloaded_files_list, output_dir):
-    # ... (без изменений по сравнению с v0.6.1)
-    # 1. Проверяем в info_dict['requested_subtitles']
-    if 'requested_subtitles' in info_dict and info_dict['requested_subtitles']:
-        # yt-dlp может вернуть 'ru' даже если запрашивали 'ru-RU' или 'ru-*'
-        # Поэтому ищем по основному коду языка
+def _get_subtitle_path(info_dict, lang_code_to_find, video_filepath_no_ext, downloaded_files_list, output_dir): # ... (без изменений) ...
+    if info_dict and 'requested_subtitles' in info_dict and info_dict['requested_subtitles']:
         base_lang_to_find = lang_code_to_find.split('-')[0]
         for actual_lang_key, sub_info in info_dict['requested_subtitles'].items():
-            if actual_lang_key.startswith(base_lang_to_find):
-                 if sub_info.get('filepath') and os.path.exists(sub_info['filepath']):
-                    return sub_info['filepath'], sub_info.get('ext', 'srt')
-
-    possible_exts = ['vtt', 'srt'] # VTT часто предпочтительнее для YouTube
-    # 2. Ищем среди всех скачанных файлов
-    for f_path in downloaded_files_list:
+            if actual_lang_key.startswith(base_lang_to_find): 
+                 sub_filepath = sub_info.get('filepath')
+                 if sub_filepath and os.path.exists(sub_filepath) and os.path.getsize(sub_filepath) > 0 :
+                    return sub_filepath, sub_info.get('ext', 'vtt')
+    possible_exts = ['vtt', 'srt'] 
+    for f_path in downloaded_files_list: 
         f_name_lower = os.path.basename(f_path).lower()
-        # Проверяем, содержит ли имя файла код языка и одно из расширений
+        video_base_name_lower_for_sub = ""
+        if video_filepath_no_ext: video_base_name_lower_for_sub = os.path.basename(video_filepath_no_ext).lower()
+        elif info_dict and info_dict.get('title') and info_dict.get('id'):
+             sanitized_title = "".join(c for c in info_dict['title'] if c.isalnum() or c in (' ', '_', '-')).rstrip()
+             video_base_name_lower_for_sub = f"{sanitized_title}.{info_dict['id']}".lower()
         for ext_iter in possible_exts:
-            # Ищем точное совпадение или начало (например, ru-RU.vtt для lang_code_to_find='ru')
-            if f".{lang_code_to_find}.{ext_iter}" in f_name_lower or \
-               (lang_code_to_find.split('-')[0] + "." + ext_iter in f_name_lower and f_name_lower.startswith(os.path.basename(video_filepath_no_ext).lower())):
-                if os.path.exists(f_path):
-                    return f_path, ext_iter
-    
-    # 3. Формируем ожидаемые пути
-    for ext_iter in possible_exts:
-        # Точный путь с кодом языка
-        expected_path_lang = f"{video_filepath_no_ext}.{lang_code_to_find}.{ext_iter}"
-        if os.path.exists(expected_path_lang):
-            return expected_path_lang, ext_iter
-        
-        # Путь с базовым кодом языка (например, file.ru.vtt для lang_code_to_find='ru-RU')
-        base_lang_to_find = lang_code_to_find.split('-')[0]
-        if base_lang_to_find != lang_code_to_find:
-            expected_path_base_lang = f"{video_filepath_no_ext}.{base_lang_to_find}.{ext_iter}"
-            if os.path.exists(expected_path_base_lang):
-                return expected_path_base_lang, ext_iter
-
-        # Поиск по шаблону в директории (на случай нестандартных имен)
-        for f_in_dir in os.listdir(output_dir):
-            f_in_dir_lower = f_in_dir.lower()
-            if f_in_dir_lower.startswith(os.path.basename(video_filepath_no_ext).lower()) and \
-               f".{base_lang_to_find}." in f_in_dir_lower and f_in_dir_lower.endswith(f".{ext_iter}"):
-                full_path = os.path.join(output_dir, f_in_dir)
-                if os.path.exists(full_path):
-                     return full_path, ext_iter
+            name_prefix_matches = (video_base_name_lower_for_sub and f_name_lower.startswith(video_base_name_lower_for_sub)) or \
+                                  (not video_base_name_lower_for_sub)
+            lang_tag_matches = (f".{lang_code_to_find}.{ext_iter}" in f_name_lower or \
+                                f".{lang_code_to_find.split('-')[0]}.{ext_iter}" in f_name_lower)
+            if name_prefix_matches and lang_tag_matches and \
+               os.path.exists(f_path) and os.path.getsize(f_path) > 0:
+                return f_path, ext_iter
+    if video_filepath_no_ext:
+        for ext_iter in possible_exts:
+            expected_paths_to_check = [
+                f"{video_filepath_no_ext}.{lang_code_to_find}.{ext_iter}",
+                f"{video_filepath_no_ext}.{lang_code_to_find.split('-')[0]}.{ext_iter}" ]
+            for expected_path in set(expected_paths_to_check):
+                if os.path.exists(expected_path) and os.path.getsize(expected_path) > 0:
+                    return expected_path, ext_iter
     return None, None
 
 def download_youtube_video(url, output_dir, quality='1080p', 
-                           preferred_sub_lang='ru', fallback_sub_lang='en'):
-    if yt_dlp is None: 
-        raise ImportError("yt-dlp library not found. Please install it using: pip install yt-dlp")
-
+                           preferred_sub_lang='ru', fallback_sub_lang='en'): # Убран cookie_file_path
+    # ... (остальной код без изменений, кроме удаления cookie_file_path из base_ydl_opts) ...
+    if yt_dlp is None: raise ImportError("yt-dlp library not found. Please install it using: pip install yt-dlp")
     video_filename_final = None; subtitle_filename_final = None; actual_sub_lang_found = None
-    
-    preferred_sub_langs_list = [preferred_sub_lang] if preferred_sub_lang else []
-    if preferred_sub_lang and '-' in preferred_sub_lang: # ru-RU -> ['ru-RU', 'ru']
-        preferred_sub_langs_list.append(preferred_sub_lang.split('-')[0])
-    preferred_sub_langs_list = sorted(list(set(filter(None, preferred_sub_langs_list))), key=len, reverse=True)
-
-    fallback_sub_langs_list = [fallback_sub_lang] if fallback_sub_lang else []
-    if fallback_sub_lang and '-' in fallback_sub_lang:
-        fallback_sub_langs_list.append(fallback_sub_lang.split('-')[0])
-    fallback_sub_langs_list = sorted(list(set(filter(None, fallback_sub_langs_list))), key=len, reverse=True)
-
+    unique_sub_langs = []
+    if preferred_sub_lang: unique_sub_langs.append(preferred_sub_lang)
+    if fallback_sub_lang and fallback_sub_lang not in unique_sub_langs: unique_sub_langs.append(fallback_sub_lang)
+    for lang in list(unique_sub_langs):
+        if '-' in lang:
+            base_lang = lang.split('-')[0]
+            if base_lang not in unique_sub_langs: unique_sub_langs.append(base_lang)
+    outtmpl_str = os.path.join(output_dir, '%(title)s.%(id)s.%(ext)s')
     base_ydl_opts = {
         'format': f'bestvideo[height<={quality[:-1]}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality[:-1]}][ext=mp4]/best[ext=mp4]/best',
-        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'), 
+        'outtmpl': outtmpl_str, 
         'noplaylist': True, 'merge_output_format': 'mp4',
-        'quiet': True, 'no_warnings': True, # Возвращаем обратно для чистоты логов, если отладка yt-dlp не нужна
-        # 'verbose': True, # Можно включить для максимальной отладки yt-dlp
-        'writesubtitles': True,
-        'writeautomaticsub': True, 
-        'subtitlesformat': 'vtt/srt', # VTT часто более доступен на YouTube
-        'ignoreerrors': True, 
-        'no_color': True,
-        'cachedir': False, # Отключаем кэш yt-dlp явно (эквивалент --no-cache-dir)
-        # '--no-cache-dir': True, # Прямая передача аргумента командной строки (может не работать через API)
-                                 # Вместо этого используем 'cachedir': False
+        'writesubtitles': True, 'writeautomaticsub': True, 
+        'subtitlesformat': 'vtt/srt', 
+        'ignoreerrors': True, 'no_color': True, 'cachedir': False,
     }
-    print(f"Processing YouTube URL: {url}")
+    # print(f"Processing YouTube URL: {url}") # Уже логируется в _attempt_yt_dlp_download
     all_downloaded_files_session = [] 
-
-    # --- Попытка 1: Видео + Предпочитаемые субтитры ---
-    if preferred_sub_langs_list:
-        print(f"Attempting to download video and preferred subtitles ({', '.join(preferred_sub_langs_list)})...")
-        current_ydl_opts_pref = base_ydl_opts.copy()
-        current_ydl_opts_pref['subtitleslangs'] = [f"{lang}*" for lang in preferred_sub_langs_list] # Добавляем * для поиска поддиалектов
-        
-        try:
-            video_file_pref, info_dict_pref, downloaded_pref = _attempt_yt_dlp_download(current_ydl_opts_pref, url)
-            all_downloaded_files_session.extend(x for x in downloaded_pref if x not in all_downloaded_files_session)
-
-            if video_file_pref and os.path.exists(video_file_pref):
-                video_filename_final = video_file_pref
-                print(f"Video downloaded: {os.path.basename(video_filename_final)}")
-                video_filepath_no_ext = os.path.splitext(video_filename_final)[0]
-                
-                for pref_lang_code_iter in preferred_sub_langs_list:
-                    sub_path, sub_ext = _get_subtitle_path(info_dict_pref, pref_lang_code_iter, video_filepath_no_ext, all_downloaded_files_session, output_dir)
-                    if sub_path:
-                        subtitle_filename_final = sub_path
-                        actual_sub_lang_found = pref_lang_code_iter.split('-')[0] # Используем основной код языка
-                        print(f"Preferred subtitles ({actual_sub_lang_found}, ext: {sub_ext}) found: {os.path.basename(subtitle_filename_final)}")
-                        break 
-            else:
-                 print(f"Video download failed or file not found from preferred sub attempt: {video_file_pref}")
-
-        except yt_dlp.utils.DownloadError as e_pref:
-            print(f"yt-dlp DownloadError during preferred subtitle attempt: {e_pref}")
-            if "Did not get any data blocks" in str(e_pref):
-                 print("This specific error often means the subtitle stream was announced but failed to download.")
-        except Exception as e_pref_other:
-            print(f"Unexpected error during preferred subtitle attempt: {e_pref_other}")
-    
-    # --- Попытка 2: Только видео или Запасные субтитры ---
-    if not video_filename_final or (video_filename_final and not subtitle_filename_final and fallback_sub_langs_list):
-        action_desc = "video only" if not video_filename_final else f"fallback subtitles ({', '.join(fallback_sub_langs_list)})"
-        print(f"Attempting to download {action_desc}...")
-        
-        current_ydl_opts_fallback = base_ydl_opts.copy()
-        if video_filename_final: 
-            current_ydl_opts_fallback['skip_download'] = True 
-            current_ydl_opts_fallback['outtmpl'] = os.path.splitext(video_filename_final)[0] + '.%(ext)s' 
-            if fallback_sub_langs_list:
-                current_ydl_opts_fallback['subtitleslangs'] = [f"{lang}*" for lang in fallback_sub_langs_list]
-            else: # Нет запасных языков, отключаем субтитры
-                current_ydl_opts_fallback['writesubtitles'] = False
-                current_ydl_opts_fallback['writeautomaticsub'] = False
-
-        else: # Видео еще не скачано
-            if fallback_sub_langs_list:
-                 current_ydl_opts_fallback['subtitleslangs'] = [f"{lang}*" for lang in fallback_sub_langs_list]
-            else: # Нет ни предпочтительных, ни запасных, качаем без сабов
-                 current_ydl_opts_fallback['writesubtitles'] = False
-                 current_ydl_opts_fallback['writeautomaticsub'] = False
-
-        try:
-            video_file_fb, info_dict_fb, downloaded_fb = _attempt_yt_dlp_download(current_ydl_opts_fallback, url)
-            all_downloaded_files_session.extend(x for x in downloaded_fb if x not in all_downloaded_files_session)
-
-            if not video_filename_final and video_file_fb and os.path.exists(video_file_fb):
-                video_filename_final = video_file_fb
-                print(f"Video downloaded (during fallback/video-only attempt): {os.path.basename(video_filename_final)}")
-
-            if video_filename_final and not subtitle_filename_final and fallback_sub_langs_list: 
-                video_filepath_no_ext = os.path.splitext(video_filename_final)[0]
-                for fall_lang_code_iter in fallback_sub_langs_list:
-                    sub_path_fb, sub_ext_fb = _get_subtitle_path(info_dict_fb, fall_lang_code_iter, video_filepath_no_ext, all_downloaded_files_session, output_dir)
-                    if sub_path_fb:
-                        subtitle_filename_final = sub_path_fb
-                        actual_sub_lang_found = fall_lang_code_iter.split('-')[0]
-                        print(f"Fallback subtitles ({actual_sub_lang_found}, ext: {sub_ext_fb}) found: {os.path.basename(subtitle_filename_final)}")
-                        break 
-        except yt_dlp.utils.DownloadError as e_fb:
-            print(f"yt-dlp DownloadError during fallback/video-only attempt: {e_fb}")
-        except Exception as e_fb_other:
-            print(f"Unexpected error during fallback/video-only attempt: {e_fb_other}")
-
+    current_ydl_opts_dl = base_ydl_opts.copy()
+    if unique_sub_langs:
+        current_ydl_opts_dl['subtitleslangs'] = [f"{lang}*" for lang in unique_sub_langs]
+    else:
+        current_ydl_opts_dl['writesubtitles'] = False
+        current_ydl_opts_dl['writeautomaticsub'] = False
+    # print(f"Attempting to download video and subtitles for languages: {current_ydl_opts_dl.get('subtitleslangs', 'None')}...")
+    info_dict_main_dl = None
+    try:
+        video_file_dl, info_dict_main_dl, downloaded_dl_files = _attempt_yt_dlp_download(current_ydl_opts_dl, url)
+        all_downloaded_files_session.extend(x for x in downloaded_dl_files if x not in all_downloaded_files_session)
+        if video_file_dl and os.path.exists(video_file_dl):
+            video_filename_final = video_file_dl
+            video_filepath_no_ext = os.path.splitext(video_filename_final)[0] if video_filename_final else None
+            search_order_langs = []
+            if preferred_sub_lang: search_order_langs.append(preferred_sub_lang)
+            if fallback_sub_lang and fallback_sub_lang != preferred_sub_lang : search_order_langs.append(fallback_sub_lang)
+            for lang_code_iter in search_order_langs:
+                sub_path, sub_ext = _get_subtitle_path(info_dict_main_dl, lang_code_iter, video_filepath_no_ext, all_downloaded_files_session, output_dir)
+                if sub_path:
+                    subtitle_filename_final = sub_path
+                    actual_sub_lang_found = lang_code_iter.split('-')[0] 
+                    break 
+    except yt_dlp.utils.DownloadError as e_dl: print(f"yt-dlp DownloadError during main download attempt for '{url}': {e_dl}")
+    except Exception as e_dl_other: print(f"Unexpected error during main download attempt for '{url}': {e_dl_other}\n{traceback.format_exc()}")
     if not video_filename_final or not os.path.exists(video_filename_final):
-        found_video_in_all_files = None
-        for f_path in all_downloaded_files_session:
-             try:
-                 video_ext_check = ('.mp4', '.mkv', '.webm', '.flv', '.mov', '.avi')
-                 if f_path.lower().endswith(video_ext_check):
-                     probe_info = ffmpeg.probe(f_path)
-                     if any(s.get('codec_type') == 'video' for s in probe_info.get('streams',[])):
-                         found_video_in_all_files = f_path
-                         break
-             except Exception:
-                 pass 
-        
-        if found_video_in_all_files:
-            video_filename_final = found_video_in_all_files
-            print(f"Video identified from all downloaded files: {os.path.basename(video_filename_final)}")
-        else:
-            raise RuntimeError(f"Failed to download or identify the YouTube video file after all attempts. URL: {url}")
-
-    if not subtitle_filename_final:
-         print(f"Subtitles for requested languages ('{preferred_sub_lang}', '{fallback_sub_lang}') were not found/downloaded after all attempts.")
-            
+        video_exts_check = ('.mp4', '.mkv', '.webm', '.flv', '.mov', '.avi')
+        for f_path_check in all_downloaded_files_session: 
+             if f_path_check.lower().endswith(video_exts_check):
+                 try:
+                     probe_info_check = ffmpeg.probe(f_path_check)
+                     if any(s.get('codec_type') == 'video' for s in probe_info_check.get('streams',[])):
+                         video_filename_final = f_path_check; break
+                 except Exception: pass
+        if not video_filename_final: raise RuntimeError(f"Failed to download or identify the YouTube video file after all attempts. URL: {url}")
+    if not subtitle_filename_final: print(f"Subtitles for requested languages ('{preferred_sub_lang}', '{fallback_sub_lang}') were not found/downloaded after all attempts.")
     return video_filename_final, subtitle_filename_final, actual_sub_lang_found
