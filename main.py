@@ -57,7 +57,7 @@ def cleanup_temp_dir(temp_dir):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Video Dubbing Tool (WhisperX/SRT + XTTS) - v0.7.4") # Версия обновлена
+        self.root.title("Video Dubbing Tool (WhisperX/SRT + XTTS) - v0.7.5") # Версия обновлена
         self.root.geometry("700x580")
         self.video_source_text = tk.StringVar()
         self.srt_path = tk.StringVar()
@@ -348,9 +348,8 @@ class App:
                 # Используем translated_segments для синтеза
                 final_dubbed_audio_path, total_raw_tts_duration, total_adjusted_segments_duration = voice_cloner.synthesize_speech_segments(
                     translated_segments, stt_audio_path_for_cloning, current_temp_dir,
-                    diarization_result_df=diarization_data_for_cloning, progress_callback=synthesis_progress_callback,
-                    use_radical_trim_pad_only_test_flag=True
-                )
+                    diarization_result_df=diarization_data_for_cloning, progress_callback=synthesis_progress_callback
+                ) # Удален use_radical_trim_pad_only_test_flag
                 self.log_time(step_name_vs, start_t_vs)
                 self._update_status(f"📊 Voice Synthesis Stats: Total raw TTS duration: {total_raw_tts_duration:.2f}s, Total final segments duration (incl. silence): {total_adjusted_segments_duration:.2f}s", append=True)
                 current_progress += dub_steps[step_name_vs]
