@@ -3,7 +3,7 @@ import subprocess
 import os
 import shutil
 import traceback
-import soundfile as sf # Добавим для проверки и получения информации
+import soundfile as sf 
 
 try:
     import yt_dlp
@@ -12,7 +12,7 @@ except ImportError:
     yt_dlp = None
     OUTTMPL_TYPES = ()
 
-def check_command_availability(command): # ... (без изменений) ...
+def check_command_availability(command): 
     try:
         command_path = shutil.which(command)
         if command_path is None: return False, f"'{command}' not found in PATH."
@@ -40,7 +40,7 @@ def check_command_availability(command): # ... (без изменений) ...
              return False, f"'{command}' found but execution failed. Error: {last_err_msg}"
     except Exception as e: return False, f"Error checking command '{command}': {e}"
 
-def extract_audio(video_path, output_audio_path, sample_rate=16000): # ... (без изменений) ...
+def extract_audio(video_path, output_audio_path, sample_rate=16000): 
     try:
         (ffmpeg.input(video_path).output(output_audio_path, format='wav', acodec='pcm_s16le', ac=1, ar=str(sample_rate))
          .overwrite_output().run(capture_stdout=True, capture_stderr=True))
@@ -51,70 +51,54 @@ def extract_audio(video_path, output_audio_path, sample_rate=16000): # ... (бе
     except Exception as e: print(f"ERROR: An unexpected error occurred during audio extraction: {e}"); raise
 
 
-def merge_audio_segments(segment_files, output_path, target_samplerate=24000, target_channels=1, target_codec='pcm_s16le'):
-    print(f"Attempting to merge {len(segment_files)} audio segments into {os.path.basename(output_path)}")
+def merge_audio_segments(segment_files, output_path, target_samplerate=24000, target_channels=1, target_codec='pcm_s16le', log_prefix="  (Merge) "):
+    if log_prefix: print(f"{log_prefix}Attempting to merge {len(segment_files)} audio segments into {os.path.basename(output_path)}")
     if not segment_files:
-        print("Warning: No segment files provided for merging. Creating an empty WAV file.")
+        if log_prefix: print(f"{log_prefix}Warning: No segment files provided for merging. Creating an empty WAV file.")
         try:
             (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
              .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
              .overwrite_output().run(capture_stdout=True, capture_stderr=True))
         except Exception as e_empty:
-            print(f"  Error creating empty WAV for merge: {e_empty}")
+            if log_prefix: print(f"{log_prefix}  Error creating empty WAV for merge: {e_empty}")
         return output_path
 
-    temp_dir_for_normalized_segments = os.path.join(os.path.dirname(output_path), "normalized_for_merge")
+    temp_dir_for_normalized_segments = os.path.join(os.path.dirname(output_path), "normalized_for_merge_" + os.path.splitext(os.path.basename(output_path))[0])
     os.makedirs(temp_dir_for_normalized_segments, exist_ok=True)
     
     list_filename = os.path.join(temp_dir_for_normalized_segments, "concat_list.txt")
     valid_normalized_segment_files = []
     total_duration_of_valid_segments = 0.0
 
-    print(f"Normalizing {len(segment_files)} segments to SR={target_samplerate}, Channels={target_channels}, Codec={target_codec}...")
+    if log_prefix: print(f"{log_prefix}Normalizing {len(segment_files)} segments to SR={target_samplerate}, Channels={target_channels}, Codec={target_codec}...")
     for idx, segment_file_original in enumerate(segment_files):
         base_name = os.path.basename(segment_file_original)
         normalized_segment_path = os.path.join(temp_dir_for_normalized_segments, f"norm_{idx:04d}_{base_name}")
 
         if not os.path.exists(segment_file_original) or os.path.getsize(segment_file_original) == 0:
-            # print(f"  Segment {base_name} is missing or empty. Creating normalized silence.")
-            # Создаем тишину той же длительности, что и должна была быть (если это известно)
-            # или минимальную тишину, если это невозможно определить.
-            # Для простоты, если исходный файл пуст, создаем очень короткую тишину,
-            # т.к. его "правильная" длительность здесь не ясна.
-            # В идеале, `synthesize_speech_segments` должна гарантировать, что все файлы имеют корректную длительность.
-            original_duration_fallback = 0.01 # Минимальная длительность
+            original_duration_fallback = 0.01 
             try:
                 (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout='mono')
                  .output(normalized_segment_path, t=original_duration_fallback, acodec=target_codec, ar=target_samplerate, ac=target_channels)
                  .overwrite_output().run(capture_stdout=True, capture_stderr=True))
             except Exception as e_norm_silence:
-                print(f"  Error creating normalized silence for missing/empty {base_name}: {e_norm_silence}")
-                continue # Пропускаем этот сегмент
+                if log_prefix: print(f"{log_prefix}  Error creating normalized silence for missing/empty {base_name}: {e_norm_silence}")
+                continue 
         else:
             try:
-                # Проверяем исходный файл перед нормализацией
-                sf_info_orig = None
-                try:
-                    sf_info_orig = sf.info(segment_file_original)
-                except Exception as e_sf_info_orig:
-                    print(f"  Warning: Could not read info for segment {base_name} with soundfile: {e_sf_info_orig}. Will attempt ffmpeg normalization.")
-
-                # Принудительная нормализация через ffmpeg
                 (ffmpeg.input(segment_file_original)
                  .output(normalized_segment_path, ar=target_samplerate, ac=target_channels, acodec=target_codec)
                  .overwrite_output().run(capture_stdout=True, capture_stderr=True))
-
             except ffmpeg.Error as e_norm:
                 stderr_norm = e_norm.stderr.decode('utf-8', errors='replace') if e_norm.stderr else "N/A"
-                print(f"  Error normalizing segment {base_name}: {stderr_norm}. Skipping.")
-                if os.path.exists(normalized_segment_path): os.remove(normalized_segment_path) # Удаляем неудавшийся файл
-                continue # Пропускаем этот сегмент
+                if log_prefix: print(f"{log_prefix}  Error normalizing segment {base_name}: {stderr_norm}. Skipping.")
+                if os.path.exists(normalized_segment_path): os.remove(normalized_segment_path)
+                continue 
             except Exception as e_gen_norm:
-                print(f"  Generic error during normalization of {base_name}: {e_gen_norm}. Skipping.")
+                if log_prefix: print(f"{log_prefix}  Generic error during normalization of {base_name}: {e_gen_norm}. Skipping.")
                 if os.path.exists(normalized_segment_path): os.remove(normalized_segment_path)
                 continue
 
-        # Проверяем нормализованный файл
         if os.path.exists(normalized_segment_path) and os.path.getsize(normalized_segment_path) > 0:
             try:
                 sf_info_norm = sf.info(normalized_segment_path)
@@ -122,40 +106,38 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
                     valid_normalized_segment_files.append(normalized_segment_path)
                     total_duration_of_valid_segments += sf_info_norm.duration
                 else:
-                    print(f"  Segment {base_name} after normalization has unexpected params: "
-                          f"SR={sf_info_norm.samplerate}, Ch={sf_info_norm.channels}. Skipping.")
+                    if log_prefix: print(f"{log_prefix}  Segment {base_name} after normalization has unexpected params: SR={sf_info_norm.samplerate}, Ch={sf_info_norm.channels}. Skipping.")
                     os.remove(normalized_segment_path)
             except Exception as e_sf_info_norm:
-                print(f"  Could not read info for normalized segment {os.path.basename(normalized_segment_path)}: {e_sf_info_norm}. Skipping.")
+                if log_prefix: print(f"{log_prefix}  Could not read info for normalized segment {os.path.basename(normalized_segment_path)}: {e_sf_info_norm}. Skipping.")
                 if os.path.exists(normalized_segment_path): os.remove(normalized_segment_path)
-        else:
-            print(f"  Normalized segment {os.path.basename(normalized_segment_path)} is missing or empty. Skipping.")
+        elif log_prefix:
+            print(f"{log_prefix}  Normalized segment {os.path.basename(normalized_segment_path)} is missing or empty. Skipping.")
     
-    print(f"Normalization complete. {len(valid_normalized_segment_files)} valid segments remaining for merge.")
-    print(f"Total duration of valid normalized segments: {total_duration_of_valid_segments:.2f}s")
+    if log_prefix:
+        print(f"{log_prefix}Normalization complete. {len(valid_normalized_segment_files)} valid segments remaining for merge.")
+        print(f"{log_prefix}Total duration of valid normalized segments: {total_duration_of_valid_segments:.2f}s")
 
     if not valid_normalized_segment_files:
-        print("Warning: No valid segments left after normalization. Creating an empty WAV file.")
+        if log_prefix: print(f"{log_prefix}Warning: No valid segments left after normalization. Creating an empty WAV file.")
         try:
             (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
              .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
              .overwrite_output().run(capture_stdout=True, capture_stderr=True))
         except Exception as e_empty_final:
-            print(f"  Error creating final empty WAV: {e_empty_final}")
+            if log_prefix: print(f"{log_prefix}  Error creating final empty WAV: {e_empty_final}")
         if os.path.exists(temp_dir_for_normalized_segments): shutil.rmtree(temp_dir_for_normalized_segments)
         return output_path
 
     with open(list_filename, "w", encoding='utf-8') as f:
         for norm_file in valid_normalized_segment_files:
-            # Нормализуем путь и используем прямые слэши для ffmpeg concat
             safe_path = os.path.normpath(os.path.abspath(norm_file)).replace('\\', '/')
             f.write(f"file '{safe_path}'\n")
 
     output_stream = None
     merged_successfully = False
     try:
-        print(f"Starting final merge of {len(valid_normalized_segment_files)} normalized segments...")
-        # Используем 'copy' кодек, так как все уже приведено к одному формату
+        if log_prefix: print(f"{log_prefix}Starting final merge of {len(valid_normalized_segment_files)} normalized segments...")
         output_options = {'acodec': 'copy'}
         output_stream = (ffmpeg.input(list_filename, format='concat', safe=0)
                          .output(output_path, **output_options)
@@ -166,61 +148,58 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
 
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             merged_successfully = True
-            print("FFmpeg merge command executed.")
-            if stderr_str and ("error" in stderr_str.lower() or "invalid" in stderr_str.lower()):
-                print(f"----- FFmpeg Warning/Error during merge_audio_segments -----\n{stderr_str}\n-------------------------")
-            else:
-                 print("FFmpeg merge seems clean (no obvious errors in stderr).")
+            if log_prefix: print(f"{log_prefix}FFmpeg merge command executed.")
+            if stderr_str and ("error" in stderr_str.lower() or "invalid" in stderr_str.lower()) and log_prefix:
+                print(f"{log_prefix}----- FFmpeg Warning/Error during merge_audio_segments -----\n{stderr_str}\n-------------------------")
+            # else:
+            #      if log_prefix: print(f"{log_prefix}FFmpeg merge seems clean (no obvious errors in stderr).")
         else:
-            print(f"ERROR: FFmpeg merging produced an empty or missing file: {output_path}.")
-            if stderr_str:
-                print(f"----- FFmpeg stderr for merge_audio_segments -----\n{stderr_str}\n-------------------------")
-            # Создаем пустой файл как fallback, если слияние не удалось
+            if log_prefix: print(f"{log_prefix}ERROR: FFmpeg merging produced an empty or missing file: {output_path}.")
+            if stderr_str and log_prefix:
+                print(f"{log_prefix}----- FFmpeg stderr for merge_audio_segments -----\n{stderr_str}\n-------------------------")
             (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
              .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
              .overwrite_output().run(capture_stdout=True, capture_stderr=True))
-            print(f"Created a fallback empty WAV file at {output_path} due to merge failure.")
+            if log_prefix: print(f"{log_prefix}Created a fallback empty WAV file at {output_path} due to merge failure.")
 
     except ffmpeg.Error as e:
-        print("CRITICAL ERROR: ffmpeg audio merging failed (ffmpeg.Error).");
+        if log_prefix: print(f"{log_prefix}CRITICAL ERROR: ffmpeg audio merging failed (ffmpeg.Error).");
         stderr_msg = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
         cmd_args_str = "N/A"
         if output_stream and hasattr(output_stream, 'get_args'):
             try: cmd_args_str = ' '.join(output_stream.get_args())
             except: pass
-        print(f"----- FFmpeg arguments for merge_audio_segments -----\nffmpeg {cmd_args_str}\n--------------------------")
-        print(f"----- FFmpeg stderr for merge_audio_segments -----\n{stderr_msg}\n-------------------------")
-        # Создаем пустой файл как fallback
+        if log_prefix:
+            print(f"{log_prefix}----- FFmpeg arguments for merge_audio_segments -----\nffmpeg {cmd_args_str}\n--------------------------")
+            print(f"{log_prefix}----- FFmpeg stderr for merge_audio_segments -----\n{stderr_msg}\n-------------------------")
         try:
             (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
                 .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
                 .overwrite_output().run(capture_stdout=True, capture_stderr=True))
-            print(f"Created a fallback empty WAV file at {output_path} due to ffmpeg.Error.")
+            if log_prefix: print(f"{log_prefix}Created a fallback empty WAV file at {output_path} due to ffmpeg.Error.")
         except Exception as e_fb_ffmpeg_err:
-             print(f"  Failed to create fallback empty WAV after ffmpeg.Error: {e_fb_ffmpeg_err}")
+             if log_prefix: print(f"{log_prefix}  Failed to create fallback empty WAV after ffmpeg.Error: {e_fb_ffmpeg_err}")
 
     except Exception as e_gen:
-         print(f"CRITICAL ERROR: An unexpected error occurred during audio merging: {e_gen}")
-         traceback.print_exc()
-         # Создаем пустой файл как fallback
+         if log_prefix: print(f"{log_prefix}CRITICAL ERROR: An unexpected error occurred during audio merging: {e_gen}")
+         if log_prefix: traceback.print_exc()
          try:
             (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
                 .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
                 .overwrite_output().run(capture_stdout=True, capture_stderr=True))
-            print(f"Created a fallback empty WAV file at {output_path} due to generic error.")
+            if log_prefix: print(f"{log_prefix}Created a fallback empty WAV file at {output_path} due to generic error.")
          except Exception as e_fb_gen_err:
-            print(f"  Failed to create fallback empty WAV after generic error: {e_fb_gen_err}")
+            if log_prefix: print(f"{log_prefix}  Failed to create fallback empty WAV after generic error: {e_fb_gen_err}")
     finally:
         if os.path.exists(temp_dir_for_normalized_segments):
             try:
                 shutil.rmtree(temp_dir_for_normalized_segments)
-                # print(f"Cleaned up temporary normalization directory: {temp_dir_for_normalized_segments}")
             except OSError as e_rem:
-                print(f"Warning: Could not remove temporary normalization directory {temp_dir_for_normalized_segments}: {e_rem}")
+                if log_prefix: print(f"{log_prefix}Warning: Could not remove temporary normalization directory {temp_dir_for_normalized_segments}: {e_rem}")
     return output_path
 
 
-def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, output_path, original_volume=0.1, dubbed_volume=1.0): # ... (без изменений) ...
+def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, output_path, original_volume=0.1, dubbed_volume=1.0): 
     output_stream = None
     try:
         input_video = ffmpeg.input(video_path); input_original_audio = ffmpeg.input(original_audio_path); input_dubbed_audio = ffmpeg.input(dubbed_audio_path)
@@ -260,10 +239,10 @@ def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, ou
         raise RuntimeError(f"Video assembly failed. FFmpeg stderr:\n{stderr}") from e
     except Exception as e: print(f"ERROR: An unexpected error occurred during video assembly: {e}"); raise
 
-def escape_ffmpeg_path(path): # ... (без изменений) ...
+def escape_ffmpeg_path(path): 
     path = path.replace('\\', '/'); path = path.replace(':', '\\:').replace("'", "'\\''"); return path
 
-def add_subtitles(video_path, srt_path, output_path): # ... (без изменений) ...
+def add_subtitles(video_path, srt_path, output_path): 
     output_stream = None
     try:
         style_options = "FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=1"
@@ -281,7 +260,7 @@ def add_subtitles(video_path, srt_path, output_path): # ... (без измене
         raise RuntimeError(f"Subtitle adding failed. FFmpeg stderr:\n{stderr}") from e
     except Exception as e: print(f"ERROR: An unexpected error occurred during subtitle adding: {e}"); raise
 
-def _attempt_yt_dlp_download(ydl_opts, url): # ... (без изменений) ...
+def _attempt_yt_dlp_download(ydl_opts, url): 
     if yt_dlp is None: raise ImportError("yt-dlp library is not available but is required for this function.")
     downloaded_files_from_hook = []
     current_ydl_opts = ydl_opts.copy(); current_ydl_opts['verbose'] = True; current_ydl_opts['quiet'] = False; current_ydl_opts['no_warnings'] = False
@@ -320,7 +299,6 @@ def _attempt_yt_dlp_download(ydl_opts, url): # ... (без изменений) .
                         expected_final_path = ydl.prepare_filename(info_dict_after_download)
                         if expected_final_path and os.path.exists(expected_final_path): main_video_file_path = expected_final_path
                     except Exception as e_prep_fn:
-                        # print(f"  yt-dlp: Error calling ydl.prepare_filename: {e_prep_fn}. Trying manual construction based on '{current_output_dir}'.")
                         video_title = info_dict_after_download.get('title', 'video'); video_id = info_dict_after_download.get('id', 'unknown_id'); file_extension = info_dict_after_download.get('ext', 'mp4')
                         safe_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '_', '-')).rstrip(); manually_constructed_filename = f"{safe_title}.{video_id}.{file_extension}"
                         manually_constructed_path = os.path.join(current_output_dir, manually_constructed_filename)
@@ -339,7 +317,7 @@ def _attempt_yt_dlp_download(ydl_opts, url): # ... (без изменений) .
         except Exception as e_generic: print(f"  yt-dlp: Generic exception during extract_info for URL '{url}': {e_generic}\n{traceback.format_exc()}")
     return main_video_file_path, info_dict_after_download, downloaded_files_from_hook
 
-def _get_subtitle_path(info_dict, lang_code_to_find, video_filepath_no_ext, downloaded_files_list, output_dir): # ... (без изменений) ...
+def _get_subtitle_path(info_dict, lang_code_to_find, video_filepath_no_ext, downloaded_files_list, output_dir): 
     if info_dict and 'requested_subtitles' in info_dict and info_dict['requested_subtitles']:
         base_lang_to_find = lang_code_to_find.split('-')[0]
         for actual_lang_key, sub_info in info_dict['requested_subtitles'].items():
@@ -363,7 +341,7 @@ def _get_subtitle_path(info_dict, lang_code_to_find, video_filepath_no_ext, down
                 if os.path.exists(expected_path) and os.path.getsize(expected_path) > 0: return expected_path, ext_iter
     return None, None
 
-def download_youtube_video(url, output_dir, quality='1080p', preferred_sub_lang='ru', fallback_sub_lang='en'): # ... (без изменений) ...
+def download_youtube_video(url, output_dir, quality='1080p', preferred_sub_lang='ru', fallback_sub_lang='en'): 
     if yt_dlp is None: raise ImportError("yt-dlp library not found. Please install it using: pip install yt-dlp")
     video_filename_final = None; subtitle_filename_final = None; actual_sub_lang_found = None; unique_sub_langs = []
     if preferred_sub_lang: unique_sub_langs.append(preferred_sub_lang)
