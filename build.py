@@ -6,7 +6,7 @@ import datetime
 # --- Configuration ---
 APP_BASE_NAME = "VideoDubbingTool" 
 MAIN_SCRIPT = "main.py"
-ICON_PATH = "app.ico" 
+ICON_PATH = "icon.ico" # <--- ИЗМЕНЕНО: указан путь к иконке
 BUILD_ONEDIR = False # False для --onefile
 
 # Формируем версию (дату) и имя приложения с версией
@@ -47,7 +47,7 @@ pyinstaller_base_options = [
     MAIN_SCRIPT,
     f"--name={APP_NAME_WITH_VERSION}", 
     "--windowed",
-    # f"--icon={ICON_PATH}", # Раскомментируйте, если есть иконка
+    f"--icon={ICON_PATH}", # <--- ИЗМЕНЕНО: раскомментировано и используется ICON_PATH
     
     # Важные hidden imports (оставляем как есть)
     "--hidden-import=torch",
@@ -88,7 +88,7 @@ pyinstaller_base_options = [
     "--hidden-import=scipy.signal",
     "--hidden-import=scipy.ndimage",
     "--hidden-import=ctranslate2", 
-    "--hidden-import=aeneas",
+    "--hidden-import=aeneas", # Оставляем на всякий случай, если вернется
     "--hidden-import=aeneas.tools",
     "--hidden-import=aeneas.tools.execute_task",
     "--hidden-import=aeneas.executetask",
@@ -96,8 +96,8 @@ pyinstaller_base_options = [
     "--hidden-import=pkg_resources.py2_warn",
     "--hidden-import=requests", 
     "--hidden-import=tqdm", 
-    "--hidden-import=charset_normalizer", # Зависимость requests
-    "--hidden-import=multiprocessing.popen_spawn_win32", # Иногда нужно для multiprocessing на Windows
+    "--hidden-import=charset_normalizer", 
+    "--hidden-import=multiprocessing.popen_spawn_win32", 
 
     '--log-level=INFO',
     '--noupx',
@@ -113,7 +113,7 @@ print(f"Собираем {APP_NAME_WITH_VERSION}...")
 print(f"Команда: pyinstaller {' '.join(pyinstaller_options)}")
 
 import sys
-sys.setrecursionlimit(5000) # Оставляем на всякий случай
+sys.setrecursionlimit(5000) 
 
 if __name__ == "__main__":
     try:
@@ -123,4 +123,3 @@ if __name__ == "__main__":
         print(f"Ошибка во время сборки: {e}")
         import traceback
         traceback.print_exc()
-    # Файл file_version_info.txt больше не создается и не удаляется

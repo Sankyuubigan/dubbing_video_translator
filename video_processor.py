@@ -40,23 +40,59 @@ def check_command_availability(command):
              return False, f"'{command}' found but execution failed. Error: {last_err_msg}"
     except Exception as e: return False, f"Error checking command '{command}': {e}"
 
-def extract_audio(video_path, output_audio_path, sample_rate=16000): 
+def get_video_duration(video_path):
     try:
-        (ffmpeg.input(video_path).output(output_audio_path, format='wav', acodec='pcm_s16le', ac=1, ar=str(sample_rate))
-         .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+        probe = ffmpeg.probe(video_path)
+        duration_str = probe.get('format', {}).get('duration')
+        if duration_str is None:
+            for stream in probe.get('streams', []):
+                if stream.get('codec_type') == 'video' and stream.get('duration'):
+                    duration_str = stream.get('duration')
+                    break
+        if duration_str:
+            return float(duration_str)
+        else:
+            print(f"Warning: Could not determine duration from format or video streams for {os.path.basename(video_path)}.")
+            return 0
+    except ffmpeg.Error as e:
+        stderr_decoded = e.stderr.decode('utf8', 'ignore') if e.stderr else "N/A"
+        print(f"Error probing video duration for {os.path.basename(video_path)}: {stderr_decoded}")
+        return 0
+    except Exception as e:
+        print(f"Unexpected error probing video duration for {os.path.basename(video_path)}: {e}")
+        return 0
+
+def extract_audio(video_path, output_audio_path, sample_rate=16000, start_time_seconds=None, duration_seconds=None): 
+    try:
+        input_options = {}
+        if start_time_seconds is not None:
+            input_options['ss'] = str(start_time_seconds)
+        
+        input_stream = ffmpeg.input(video_path, **input_options)
+        
+        output_options_ffmpeg = {'format': 'wav', 'acodec': 'pcm_s16le', 'ac': 1, 'ar': str(sample_rate)}
+        if duration_seconds is not None:
+            output_options_ffmpeg['t'] = str(duration_seconds)
+        
+        (input_stream
+            .output(output_audio_path, **output_options_ffmpeg)
+            .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+                
         return output_audio_path
     except ffmpeg.Error as e:
-        print("ERROR: ffmpeg audio extraction failed."); stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
+        print(f"ERROR: ffmpeg audio extraction failed for video '{os.path.basename(video_path)}'. Start: {start_time_seconds}, Duration: {duration_seconds}"); 
+        stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
         raise RuntimeError(f"Audio extraction failed: {stderr}") from e
-    except Exception as e: print(f"ERROR: An unexpected error occurred during audio extraction: {e}"); raise
-
+    except Exception as e: 
+        print(f"ERROR: An unexpected error occurred during audio extraction from '{os.path.basename(video_path)}': {e}"); 
+        raise
 
 def merge_audio_segments(segment_files, output_path, target_samplerate=24000, target_channels=1, target_codec='pcm_s16le', log_prefix="  (Merge) "):
     if log_prefix: print(f"{log_prefix}Attempting to merge {len(segment_files)} audio segments into {os.path.basename(output_path)}")
     if not segment_files:
         if log_prefix: print(f"{log_prefix}Warning: No segment files provided for merging. Creating an empty WAV file.")
         try:
-            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
+            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout=f"{target_channels}c" if target_channels > 1 else "mono")
              .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
              .overwrite_output().run(capture_stdout=True, capture_stderr=True))
         except Exception as e_empty:
@@ -68,8 +104,7 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
     
     list_filename = os.path.join(temp_dir_for_normalized_segments, "concat_list.txt")
     valid_normalized_segment_files = []
-    total_duration_of_valid_segments = 0.0
-
+    
     if log_prefix: print(f"{log_prefix}Normalizing {len(segment_files)} segments to SR={target_samplerate}, Channels={target_channels}, Codec={target_codec}...")
     for idx, segment_file_original in enumerate(segment_files):
         base_name = os.path.basename(segment_file_original)
@@ -78,7 +113,7 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
         if not os.path.exists(segment_file_original) or os.path.getsize(segment_file_original) == 0:
             original_duration_fallback = 0.01 
             try:
-                (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout='mono')
+                (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout=f"{target_channels}c" if target_channels > 1 else "mono")
                  .output(normalized_segment_path, t=original_duration_fallback, acodec=target_codec, ar=target_samplerate, ac=target_channels)
                  .overwrite_output().run(capture_stdout=True, capture_stderr=True))
             except Exception as e_norm_silence:
@@ -100,28 +135,17 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
                 continue
 
         if os.path.exists(normalized_segment_path) and os.path.getsize(normalized_segment_path) > 0:
-            try:
-                sf_info_norm = sf.info(normalized_segment_path)
-                if sf_info_norm.samplerate == target_samplerate and sf_info_norm.channels == target_channels:
-                    valid_normalized_segment_files.append(normalized_segment_path)
-                    total_duration_of_valid_segments += sf_info_norm.duration
-                else:
-                    if log_prefix: print(f"{log_prefix}  Segment {base_name} after normalization has unexpected params: SR={sf_info_norm.samplerate}, Ch={sf_info_norm.channels}. Skipping.")
-                    os.remove(normalized_segment_path)
-            except Exception as e_sf_info_norm:
-                if log_prefix: print(f"{log_prefix}  Could not read info for normalized segment {os.path.basename(normalized_segment_path)}: {e_sf_info_norm}. Skipping.")
-                if os.path.exists(normalized_segment_path): os.remove(normalized_segment_path)
+            valid_normalized_segment_files.append(normalized_segment_path)
         elif log_prefix:
             print(f"{log_prefix}  Normalized segment {os.path.basename(normalized_segment_path)} is missing or empty. Skipping.")
     
     if log_prefix:
         print(f"{log_prefix}Normalization complete. {len(valid_normalized_segment_files)} valid segments remaining for merge.")
-        print(f"{log_prefix}Total duration of valid normalized segments: {total_duration_of_valid_segments:.2f}s")
 
     if not valid_normalized_segment_files:
         if log_prefix: print(f"{log_prefix}Warning: No valid segments left after normalization. Creating an empty WAV file.")
         try:
-            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
+            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout=f"{target_channels}c" if target_channels > 1 else "mono")
              .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
              .overwrite_output().run(capture_stdout=True, capture_stderr=True))
         except Exception as e_empty_final:
@@ -134,57 +158,28 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
             safe_path = os.path.normpath(os.path.abspath(norm_file)).replace('\\', '/')
             f.write(f"file '{safe_path}'\n")
 
-    output_stream = None
-    merged_successfully = False
     try:
         if log_prefix: print(f"{log_prefix}Starting final merge of {len(valid_normalized_segment_files)} normalized segments...")
-        output_options = {'acodec': 'copy'}
-        output_stream = (ffmpeg.input(list_filename, format='concat', safe=0)
-                         .output(output_path, **output_options)
-                         .overwrite_output())
-        
-        _stdout, stderr = output_stream.run(capture_stdout=True, capture_stderr=True)
-        stderr_str = stderr.decode('utf-8', errors='replace') if stderr else "N/A"
-
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            merged_successfully = True
-            if log_prefix: print(f"{log_prefix}FFmpeg merge command executed.")
-            if stderr_str and ("error" in stderr_str.lower() or "invalid" in stderr_str.lower()) and log_prefix:
-                print(f"{log_prefix}----- FFmpeg Warning/Error during merge_audio_segments -----\n{stderr_str}\n-------------------------")
-            # else:
-            #      if log_prefix: print(f"{log_prefix}FFmpeg merge seems clean (no obvious errors in stderr).")
-        else:
-            if log_prefix: print(f"{log_prefix}ERROR: FFmpeg merging produced an empty or missing file: {output_path}.")
-            if stderr_str and log_prefix:
-                print(f"{log_prefix}----- FFmpeg stderr for merge_audio_segments -----\n{stderr_str}\n-------------------------")
-            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
-             .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
-             .overwrite_output().run(capture_stdout=True, capture_stderr=True))
-            if log_prefix: print(f"{log_prefix}Created a fallback empty WAV file at {output_path} due to merge failure.")
-
+        (ffmpeg.input(list_filename, format='concat', safe=0)
+            .output(output_path, acodec='copy') 
+            .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+        if log_prefix: print(f"{log_prefix}Audio segments merged successfully to {os.path.basename(output_path)}")
     except ffmpeg.Error as e:
         if log_prefix: print(f"{log_prefix}CRITICAL ERROR: ffmpeg audio merging failed (ffmpeg.Error).");
         stderr_msg = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
-        cmd_args_str = "N/A"
-        if output_stream and hasattr(output_stream, 'get_args'):
-            try: cmd_args_str = ' '.join(output_stream.get_args())
-            except: pass
-        if log_prefix:
-            print(f"{log_prefix}----- FFmpeg arguments for merge_audio_segments -----\nffmpeg {cmd_args_str}\n--------------------------")
-            print(f"{log_prefix}----- FFmpeg stderr for merge_audio_segments -----\n{stderr_msg}\n-------------------------")
+        if log_prefix: print(f"{log_prefix}----- FFmpeg stderr for merge_audio_segments -----\n{stderr_msg}\n-------------------------")
         try:
-            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
+            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout=f"{target_channels}c" if target_channels > 1 else "mono")
                 .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
                 .overwrite_output().run(capture_stdout=True, capture_stderr=True))
             if log_prefix: print(f"{log_prefix}Created a fallback empty WAV file at {output_path} due to ffmpeg.Error.")
         except Exception as e_fb_ffmpeg_err:
              if log_prefix: print(f"{log_prefix}  Failed to create fallback empty WAV after ffmpeg.Error: {e_fb_ffmpeg_err}")
-
     except Exception as e_gen:
          if log_prefix: print(f"{log_prefix}CRITICAL ERROR: An unexpected error occurred during audio merging: {e_gen}")
          if log_prefix: traceback.print_exc()
          try:
-            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate)
+            (ffmpeg.input('anullsrc', format='lavfi', r=target_samplerate, channel_layout=f"{target_channels}c" if target_channels > 1 else "mono")
                 .output(output_path, acodec=target_codec, t=0.01, ar=target_samplerate, ac=target_channels)
                 .overwrite_output().run(capture_stdout=True, capture_stderr=True))
             if log_prefix: print(f"{log_prefix}Created a fallback empty WAV file at {output_path} due to generic error.")
@@ -192,52 +187,115 @@ def merge_audio_segments(segment_files, output_path, target_samplerate=24000, ta
             if log_prefix: print(f"{log_prefix}  Failed to create fallback empty WAV after generic error: {e_fb_gen_err}")
     finally:
         if os.path.exists(temp_dir_for_normalized_segments):
-            try:
-                shutil.rmtree(temp_dir_for_normalized_segments)
+            try: shutil.rmtree(temp_dir_for_normalized_segments)
             except OSError as e_rem:
-                if log_prefix: print(f"{log_prefix}Warning: Could not remove temporary normalization directory {temp_dir_for_normalized_segments}: {e_rem}")
+                if log_prefix: print(f"{log_prefix}Warning: Could not remove temp dir {temp_dir_for_normalized_segments}: {e_rem}")
     return output_path
 
+def concatenate_video_chunks(chunk_files, output_path, temp_dir):
+    if not chunk_files:
+        print("No video chunks to concatenate.")
+        return None
+    if len(chunk_files) == 1:
+        try:
+            shutil.copy(chunk_files[0], output_path)
+            print(f"Single video chunk copied to {output_path}")
+            return output_path
+        except Exception as e_copy:
+            print(f"Error copying single video chunk: {e_copy}")
+            return None
 
-def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, output_path, original_volume=0.1, dubbed_volume=1.0): 
+    list_filename = os.path.join(temp_dir, "concat_video_list.txt")
+    with open(list_filename, "w", encoding='utf-8') as f:
+        for chunk_file in chunk_files:
+            safe_path = os.path.normpath(os.path.abspath(chunk_file)).replace('\\', '/')
+            f.write(f"file '{safe_path}'\n")
+    
+    print(f"Attempting to concatenate {len(chunk_files)} video chunks into {os.path.basename(output_path)}")
+    try:
+        (ffmpeg
+         .input(list_filename, format='concat', safe=0, auto_convert=1)
+         .output(output_path, vcodec='copy', acodec='copy', **{'bsf:a': 'aac_adtstoasc'} if any(c.lower().endswith('.mp4') for c in chunk_files) else {})
+         .overwrite_output()
+         .run(capture_stdout=True, capture_stderr=True))
+        print(f"Video chunks successfully concatenated (codec copy) to {output_path}")
+        return output_path
+    except ffmpeg.Error as e:
+        stderr_str = e.stderr.decode('utf8', 'ignore') if e.stderr else "N/A"
+        print(f"Warning: Concatenating video chunks with codec copy failed. Retrying with re-encoding.\nFFmpeg stderr: {stderr_str[:500]}...")
+        try:
+            (ffmpeg
+             .input(list_filename, format='concat', safe=0, auto_convert=1)
+             .output(output_path, vcodec='libx264', preset='medium', crf=23, acodec='aac', audio_bitrate='192k')
+             .overwrite_output()
+             .run(capture_stdout=True, capture_stderr=True))
+            print(f"Video chunks successfully re-encoded and concatenated to {output_path}")
+            return output_path
+        except ffmpeg.Error as e2:
+            stderr_str2 = e2.stderr.decode('utf8', 'ignore') if e2.stderr else "N/A"
+            print(f"ERROR: Re-encoding and concatenating video chunks also failed.\nFFmpeg stderr: {stderr_str2[:500]}")
+            return None
+    except Exception as ex:
+        print(f"ERROR: Unexpected error during video concatenation: {ex}")
+        return None
+    finally:
+        if os.path.exists(list_filename):
+            try: os.remove(list_filename)
+            except OSError: pass
+
+def mix_and_replace_audio(video_path, original_audio_path, dubbed_audio_path, output_path, 
+                          original_volume=0.1, dubbed_volume=1.0,
+                          video_start_time=None, video_duration=None): 
     output_stream = None
     try:
-        input_video = ffmpeg.input(video_path); input_original_audio = ffmpeg.input(original_audio_path); input_dubbed_audio = ffmpeg.input(dubbed_audio_path)
-        video_stream = input_video['v']
-        has_audio_in_video = False
-        try:
-            probe = ffmpeg.probe(video_path)
-            if any(stream.get('codec_type') == 'audio' for stream in probe.get('streams', [])):
-                has_audio_in_video = True
-        except ffmpeg.Error: print(f"Warning: Could not probe video {video_path} for audio streams.")
-        if not os.path.exists(dubbed_audio_path) or os.path.getsize(dubbed_audio_path) == 0:
-            print(f"Warning: Dubbed audio file {dubbed_audio_path} is missing or empty. Using original audio only (if video has it).")
-            if has_audio_in_video and os.path.exists(original_audio_path) and os.path.getsize(original_audio_path) > 0:
-                 audio_to_use = ffmpeg.filter(input_original_audio, 'volume', str(original_volume))
-                 output_options = {'vcodec': 'copy', 'acodec': 'aac', 'audio_bitrate': '192k', 'strict': '-2'}
-                 output_stream = ffmpeg.output(video_stream, audio_to_use, output_path, **output_options).overwrite_output()
-            else:
-                 output_options = {'vcodec': 'copy', 'an': None}
-                 output_stream = ffmpeg.output(video_stream, output_path, **output_options).overwrite_output()
-        elif not os.path.exists(original_audio_path) or os.path.getsize(original_audio_path) == 0:
-            print(f"Warning: Original audio file {original_audio_path} is missing or empty. Using dubbed audio only.")
-            dubbed_audio_filtered = ffmpeg.filter(input_dubbed_audio, 'volume', str(dubbed_volume))
-            output_options = {'vcodec': 'copy', 'acodec': 'aac', 'audio_bitrate': '192k', 'strict': '-2'}
-            output_stream = ffmpeg.output(video_stream, dubbed_audio_filtered, output_path, **output_options).overwrite_output()
-        else:
-            mixed_audio = ffmpeg.filter([input_original_audio, input_dubbed_audio], 'amix', inputs=2, duration='first', dropout_transition=2, weights=f"{original_volume} {dubbed_volume}")
-            output_options = {'vcodec': 'copy', 'acodec': 'aac', 'audio_bitrate': '192k', 'strict': '-2'}
-            output_stream = ffmpeg.output(video_stream, mixed_audio, output_path, **output_options).overwrite_output()
+        input_video_options = {}
+        if video_start_time is not None:
+            input_video_options['ss'] = str(video_start_time)
+        
+        input_video = ffmpeg.input(video_path, **input_video_options)
+        video_stream_final = input_video['v']
+        if video_duration is not None:
+             video_stream_final = ffmpeg.trim(video_stream_final, duration=video_duration)
+
+        input_original_audio = None
+        if original_audio_path and os.path.exists(original_audio_path) and os.path.getsize(original_audio_path) > 0:
+            input_original_audio = ffmpeg.input(original_audio_path)
+
+        input_dubbed_audio = None
+        if dubbed_audio_path and os.path.exists(dubbed_audio_path) and os.path.getsize(dubbed_audio_path) > 0:
+            input_dubbed_audio = ffmpeg.input(dubbed_audio_path)
+
+        audio_output_stream = None
+        if input_dubbed_audio and input_original_audio: 
+            filtered_original = ffmpeg.filter(input_original_audio, 'volume', str(original_volume))
+            filtered_dubbed = ffmpeg.filter(input_dubbed_audio, 'volume', str(dubbed_volume))
+            audio_output_stream = ffmpeg.filter(
+                [filtered_original, filtered_dubbed], 
+                'amix', inputs=2, duration='first', dropout_transition=2 
+            )
+        elif input_dubbed_audio: 
+            audio_output_stream = ffmpeg.filter(input_dubbed_audio, 'volume', str(dubbed_volume))
+        elif input_original_audio: 
+            audio_output_stream = ffmpeg.filter(input_original_audio, 'volume', str(original_volume))
+        
+        output_options_ffmpeg = {'vcodec': 'copy', 'acodec': 'aac', 'audio_bitrate': '192k', 'strict': '-2'}
+        
+        if audio_output_stream:
+            output_stream = ffmpeg.output(video_stream_final, audio_output_stream, output_path, **output_options_ffmpeg).overwrite_output()
+        else: 
+            output_stream = ffmpeg.output(video_stream_final, output_path, vcodec='copy', an=None).overwrite_output()
+
         output_stream.run(capture_stdout=True, capture_stderr=True)
+        log_msg_suffix = f" (Chunk: start={video_start_time}s, dur={video_duration}s)" if video_start_time is not None else ""
+        print(f"Video assembly for '{os.path.basename(output_path)}'{log_msg_suffix} completed.")
+
     except ffmpeg.Error as e:
-        print("ERROR: ffmpeg video assembly failed."); stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
-        cmd_args_str = "N/A"
-        if output_stream and hasattr(output_stream, 'get_args'):
-            try: cmd_args_str = ' '.join(output_stream.get_args())
-            except: pass
-        print(f"----- FFmpeg arguments for mix_and_replace_audio -----\nffmpeg {cmd_args_str}\n--------------------------")
-        raise RuntimeError(f"Video assembly failed. FFmpeg stderr:\n{stderr}") from e
-    except Exception as e: print(f"ERROR: An unexpected error occurred during video assembly: {e}"); raise
+        stderr_msg = e.stderr.decode('utf-8', errors='replace') if e.stderr else "N/A"
+        print(f"ERROR: ffmpeg video assembly failed for '{os.path.basename(video_path)}'. FFmpeg stderr:\n{stderr_msg[:1000]}")
+        raise RuntimeError(f"Video assembly failed. FFmpeg stderr:\n{stderr_msg}") from e
+    except Exception as e: 
+        print(f"ERROR: An unexpected error occurred during video assembly of '{os.path.basename(video_path)}': {e}"); 
+        raise
 
 def escape_ffmpeg_path(path): 
     path = path.replace('\\', '/'); path = path.replace(':', '\\:').replace("'", "'\\''"); return path
@@ -343,12 +401,22 @@ def _get_subtitle_path(info_dict, lang_code_to_find, video_filepath_no_ext, down
 
 def download_youtube_video(url, output_dir, quality='1080p', preferred_sub_lang='ru', fallback_sub_lang='en'): 
     if yt_dlp is None: raise ImportError("yt-dlp library not found. Please install it using: pip install yt-dlp")
-    video_filename_final = None; subtitle_filename_final = None; actual_sub_lang_found = None; unique_sub_langs = []
+    video_filename_final = None; subtitle_filename_final = None; actual_sub_lang_found = None
+    
+    unique_sub_langs = []
     if preferred_sub_lang: unique_sub_langs.append(preferred_sub_lang)
     if fallback_sub_lang and fallback_sub_lang not in unique_sub_langs: unique_sub_langs.append(fallback_sub_lang)
-    for lang in list(unique_sub_langs):
-        if '-' in lang: base_lang = lang.split('-')[0];
-        if base_lang not in unique_sub_langs: unique_sub_langs.append(base_lang)
+    
+    # Исправление UnboundLocalError
+    temp_langs_to_add = []
+    for lang in list(unique_sub_langs): # Итерируемся по копии, чтобы изменять оригинал
+        if '-' in lang:
+            base_lang = lang.split('-')[0] # base_lang определяется здесь
+            if base_lang not in unique_sub_langs and base_lang not in temp_langs_to_add:
+                temp_langs_to_add.append(base_lang)
+    unique_sub_langs.extend(temp_langs_to_add)
+    # Конец исправления
+
     outtmpl_str = os.path.join(output_dir, '%(title)s.%(id)s.%(ext)s')
     base_ydl_opts = {
         'format': f'bestvideo[height<={quality[:-1]}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality[:-1]}][ext=mp4]/best[ext=mp4]/best',
