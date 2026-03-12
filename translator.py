@@ -1,80 +1,104 @@
-# Содержимое файла translator.py остается БЕЗ ИЗМЕНЕНИЙ
-# по сравнению с предыдущим ответом.
-from transformers import pipeline
-import torch
+import ctranslate2
+import sentencepiece as spm
+import os
 from types import SimpleNamespace
-import time
 
-translator_cache = SimpleNamespace(pipeline=None)
-DEFAULT_TRANSLATOR_MODEL = "Helsinki-NLP/opus-mt-en-ru"
+# Кэш
+translator_cache = SimpleNamespace(translator=None, tokenizer=None)
 
-def load_translator_model(model_name=DEFAULT_TRANSLATOR_MODEL, device="cpu"):
+def load_translator(models_dir, device="cpu"):
     global translator_cache
-    if translator_cache.pipeline is None:
-        print(f"Loading translation model: {model_name} on device: {device}")
-        device_id = 0 if device == "cuda" else -1
-        try:
-            translator_cache.pipeline = pipeline("translation", model=model_name, device=device_id)
-            print("Translation model loaded.")
-        except Exception as e:
-            print(f"Error loading translation model {model_name}: {e}")
-            translator_cache.pipeline = None; raise
-    else:
-        print("Using cached translation model.")
-    return translator_cache.pipeline
+    if translator_cache.translator: return translator_cache.translator, translator_cache.tokenizer
 
-def translate_segments(segments, target_language="ru"):
-    if not segments: return []
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Translator using device: {device}")
-    translator_pipeline = load_translator_model(device=device)
-    if translator_pipeline is None: raise RuntimeError("Translation model could not be loaded.")
-
-    print(f"Translating {len(segments)} segments to {target_language}...")
-    texts_to_translate = [segment['text'] for segment in segments if segment.get('text','').strip()]
-    if not texts_to_translate:
-        print("No text found in segments to translate.")
-        for segment in segments: segment['translated_text'] = segment.get('text', "")
-        return segments
-
-    start_time_trans = time.time()
-    try:
-        # Увеличим max_length, если тексты могут быть длинными, но это может потребовать больше памяти
-        translations = translator_pipeline(texts_to_translate, max_length=512, truncation=True)
-    except Exception as e:
-        print(f"Error during batch translation: {e}. Falling back to one-by-one.")
-        translations = []
-        for i, text_segment in enumerate(texts_to_translate):
-            print(f"Translating segment {i+1}/{len(texts_to_translate)} individually...")
-            try:
-                translation_result = translator_pipeline(text_segment, max_length=512, truncation=True)
-                translations.append(translation_result[0])
-            except Exception as e_single:
-                 print(f"Error translating segment: {text_segment[:50]}... Error: {e_single}")
-                 translations.append({'translation_text': f"[Translation Error: {text_segment[:30]}...]"})
+    mt_dir = os.path.join(models_dir, "mt_nllb_ct2")
     
-    end_time_trans = time.time()
-    print(f"Translation of {len(texts_to_translate)} texts took {end_time_trans - start_time_trans:.2f} seconds.")
+    # NLLB в CT2 обычно ищет model.bin
+    # Иногда при распаковке создается подпапка. Найдем её.
+    model_path = mt_dir
+    for root, dirs, files in os.walk(mt_dir):
+        if "model.bin" in files:
+            model_path = root
+            break
+            
+    print(f"Loading CTranslate2 NLLB from {model_path} on {device}...")
+    
+    # Определяем device для CT2
+    ct_device = "cuda" if device == "cuda" else "cpu"
+    
+    translator = ctranslate2.Translator(model_path, device=ct_device)
+    
+    # Загружаем токенизатор (SentencePiece)
+    # В папке модели должен быть файл sentencepiece.model или shared_vocabulary.txt
+    # NLLB обычно использует sentencepiece.
+    sp_model = os.path.join(model_path, "sentencepiece.bpe.model") # Имя может отличаться
+    if not os.path.exists(sp_model):
+        # Попробуем поискать любой .model файл
+        for f in os.listdir(model_path):
+            if f.endswith(".model"):
+                sp_model = os.path.join(model_path, f)
+                break
+                
+    if not os.path.exists(sp_model):
+        # Если нет SP модели, возможно это HF токенизатор, но CT2 нужен SP для NLLB обычно.
+        # Для NLLB-200-distilled-600M часто идет `flores200_sacrebleu_tokenizer_spm.model`
+        raise FileNotFoundError(f"SentencePiece model not found in {model_path}")
 
-    # Сопоставляем переводы с оригинальными текстами для правильного присвоения
-    # Это важно, т.к. texts_to_translate мог быть отфильтрован от пустых
-    translated_text_iter = iter(translations)
-    translated_segments_list = []
-    for segment in segments:
-        new_segment = segment.copy()
-        original_text = segment.get('text', '').strip()
-        if original_text:
-            try:
-                # Берем следующий перевод из итератора
-                new_segment['translated_text'] = next(translated_text_iter)['translation_text']
-            except StopIteration:
-                 # Этого не должно случиться, если texts_to_translate и translations имеют одинаковую длину
-                 print(f"Warning: Ran out of translations for segment with original text: {original_text[:30]}...")
-                 new_segment['translated_text'] = "[Translation Missing]"
-            except KeyError:
-                 print(f"Warning: 'translation_text' key missing for segment with original text: {original_text[:30]}...")
-                 new_segment['translated_text'] = "[Translation Error]"
-        else:
-            new_segment['translated_text'] = ""
-        translated_segments_list.append(new_segment)
-    return translated_segments_list
+    sp = spm.SentencePieceProcessor()
+    sp.load(sp_model)
+    
+    translator_cache.translator = translator
+    translator_cache.tokenizer = sp
+    return translator, sp
+
+def translate_segments(segments, models_dir, target_lang="rus_Cyrl"):
+    """
+    Переводит сегменты используя CTranslate2 + NLLB.
+    """
+    if not segments: return segments, True
+    
+    device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+    translator, sp = load_translator(models_dir, device)
+    
+    texts = [s.get('text', '').strip() for s in segments]
+    non_empty_indices = [i for i, t in enumerate(texts) if t]
+    non_empty_texts = [texts[i] for i in non_empty_indices]
+    
+    if not non_empty_texts: return segments, True
+
+    print(f"Translating {len(non_empty_texts)} segments to {target_lang}...")
+    
+    # 1. Tokenize
+    # NLLB требует исходный язык, например eng_Latn
+    source_tokens = [sp.encode_as_pieces(t) for t in non_empty_texts]
+    
+    # Добавляем тег языка источника в начало (для NLLB это важно, если модель не делает это сама)
+    # CT2 NLLB обычно ожидает target_prefix. Source prefix подается как первый токен?
+    # Обычно: </s> eng_Latn ... 
+    # Но проще использовать API translate_batch с target_prefix
+    
+    # 2. Translate
+    # target_prefix=[['rus_Cyrl']] * len
+    results = translator.translate_batch(
+        source_tokens,
+        target_prefix=[[target_lang]] * len(source_tokens),
+        beam_size=4
+    )
+    
+    # 3. Detokenize
+    translated_texts = []
+    for res in results:
+        # res.hypotheses[0] - лучший вариант
+        # Убираем тег языка если он есть в начале
+        tokens = res.hypotheses[0]
+        if tokens and tokens[0] == target_lang: tokens = tokens[1:]
+        decoded = sp.decode(tokens)
+        translated_texts.append(decoded)
+        
+    # 4. Assign back
+    for i, idx in enumerate(non_empty_indices):
+        segments[idx]['translated_text'] = translated_texts[i]
+        
+    for i, s in enumerate(segments):
+        if 'translated_text' not in s: s['translated_text'] = s.get('text', '')
+
+    return segments, True

@@ -1,514 +1,109 @@
 import os
 import json
-import shutil
 import platform 
-import tempfile
-import subprocess
 import requests 
 from tqdm import tqdm 
-import zipfile 
-import tarfile 
 import sys 
 
-# --- Константы для рабочей директории и инструментов ---
+# Константы
 CONFIG_FILE_NAME = "app_settings.json" 
-
 FFMPEG_DIR = "ffmpeg" 
 FFMPEG_EXE_NAME = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
 FFPROBE_EXE_NAME = "ffprobe.exe" if platform.system() == "Windows" else "ffprobe"
 
-CURRENT_FFMPEG_PATH = None
-CURRENT_FFPROBE_PATH = None
-CURRENT_ESPEAK_PATH = None # Оставляем для совместимости, если кто-то использует Aeneas вручную
-
-FFMPEG_WINDOWS_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" 
-
-def _download_file(url, target_path, description="Скачивание"):
-    print(f"Скачивание {description} с {url} в {target_path}...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    
-    # Замена try...except на проверку статуса ответа
-    response = None
-    try:
-        response = requests.get(url, stream=True, timeout=300, headers=headers, allow_redirects=True)
-    except requests.exceptions.RequestException as e:
-        print(f"Ошибка соединения при скачивании {description} ({url}): {e}")
-        if os.path.exists(target_path): 
-            os.remove(target_path)
-        return False
-
-    if response is not None and response.ok:
-        total_size = int(response.headers.get('content-length', 0))
-        
-        write_error = False
-        try:
-            with open(target_path, 'wb') as f, tqdm(
-                desc=description,
-                total=total_size,
-                unit='iB',
-                unit_scale=True,
-                unit_divisor=1024,
-            ) as bar:
-                for data in response.iter_content(chunk_size=1024*1024): 
-                    if data: # Убедимся, что есть данные для записи
-                        size = f.write(data)
-                        bar.update(size)
-                    else: # Если получили пустой чанк, это может быть проблемой
-                        print(f"Предупреждение: получен пустой чанк данных при скачивании {description}.")
-                        # Можно добавить логику прерывания, если это критично
-        except IOError as e_io:
-            print(f"Ошибка записи файла при скачивании {description} в {target_path}: {e_io}")
-            write_error = True
-        except Exception as e_write: # Другие возможные ошибки записи
-            print(f"Непредвиденная ошибка при записи файла {description}: {e_write}")
-            write_error = True
-
-        if not write_error and os.path.exists(target_path) and os.path.getsize(target_path) > 0 :
-             if total_size != 0 and os.path.getsize(target_path) != total_size:
-                 print(f"Предупреждение: Размер скачанного файла {os.path.getsize(target_path)} не совпадает с ожидаемым {total_size} для {description}.")
-                 # Можно решить, считать ли это ошибкой
-             print(f"{description} успешно скачан.")
-             return True
-        else:
-            print(f"Ошибка: Файл {description} не был корректно записан или пуст после скачивания.")
-            if os.path.exists(target_path): 
-                os.remove(target_path)
-            return False
-    else:
-        status_code = response.status_code if response is not None else "N/A"
-        reason = response.reason if response is not None else "No response"
-        print(f"Ошибка скачивания {description} ({url}). Статус: {status_code}, Причина: {reason}")
-        if os.path.exists(target_path): 
-            os.remove(target_path)
-        return False
-
-
-def _extract_zip(zip_path, extract_to_dir, strip_components=0):
-    print(f"Распаковка {zip_path} в {extract_to_dir} (strip_components={strip_components})...")
-    
-    if not os.path.exists(zip_path):
-        print(f"Ошибка: ZIP-архив {zip_path} не найден.")
-        return False
-        
-    if not zipfile.is_zipfile(zip_path): # Проверка, является ли файл ZIP-архивом
-        print(f"Ошибка: {zip_path} не является корректным ZIP-архивом.")
-        return False
-
-    zip_ref = None
-    try:
-        zip_ref = zipfile.ZipFile(zip_path, 'r')
-        member_list = zip_ref.infolist()
-        if not member_list:
-            print(f"Ошибка: ZIP-архив {zip_path} пуст.")
-            return False # Закрытие файла будет в finally
-
-        # Логика strip_components остается прежней, она не содержит try-except, требующего замены
-        if strip_components == 0 and len(member_list) > 0:
-            top_level_paths = set()
-            for member in member_list:
-                path_parts = member.filename.replace('\\', '/').split('/')
-                if path_parts and path_parts[0]: 
-                    top_level_paths.add(path_parts[0])
-            
-            if len(top_level_paths) == 1:
-                single_top_level_name = list(top_level_paths)[0]
-                all_inside = True
-                first_member_is_dir_and_matches = False
-                
-                for m_info_idx, m_info in enumerate(member_list):
-                    if not m_info.filename.strip() == '': 
-                        current_member_path_norm = m_info.filename.replace('\\', '/').strip('/')
-                        if current_member_path_norm == single_top_level_name and m_info.is_dir():
-                            first_member_is_dir_and_matches = True
-                        elif current_member_path_norm.startswith(single_top_level_name + '/') :
-                            first_member_is_dir_and_matches = True 
-                        break 
-                
-                if first_member_is_dir_and_matches:
-                    for member in member_list:
-                        if not member.filename.replace('\\', '/').startswith(single_top_level_name + '/'):
-                            if member.filename.replace('\\', '/').strip('/') != single_top_level_name: 
-                                all_inside = False
-                                break
-                    if all_inside:
-                        print(f"INFO: Обнаружена одна корневая папка '{single_top_level_name}' в архиве. Применяется strip_components=1.")
-                        strip_components = 1
-
-        # Распаковка файлов
-        for member in member_list:
-            path_parts = member.filename.replace('\\', '/').split('/')
-            
-            if len(path_parts) <= strip_components and strip_components > 0: 
-                continue
-            
-            target_filename_parts = path_parts[strip_components:]
-            if not target_filename_parts or not ''.join(target_filename_parts).strip(): 
-                continue 
-                
-            target_filename = os.path.join(*target_filename_parts)
-            target_path = os.path.join(extract_to_dir, target_filename)
-            
-            # Проверка на "zip slip" уязвимость (хотя member.filename должен быть относительным)
-            if not os.path.abspath(target_path).startswith(os.path.abspath(extract_to_dir)):
-                print(f"ПРЕДУПРЕЖДЕНИЕ: Попытка распаковки файла '{member.filename}' за пределы целевой директории '{extract_to_dir}'. Пропускаем.")
-                continue
-
-            if member.is_dir() or member.filename.endswith('/'): 
-                if not os.path.isdir(target_path): # Создаем, только если не существует
-                    os.makedirs(target_path, exist_ok=True)
-            else: 
-                parent_dir = os.path.dirname(target_path)
-                if parent_dir and not os.path.isdir(parent_dir): # Создаем, только если не существует
-                    os.makedirs(parent_dir, exist_ok=True)
-                
-                # shutil.copyfileobj может вызвать ошибки, но они редки и связаны с ФС.
-                # Оставим try-except для shutil, так как это низкоуровневая операция.
-                try:
-                    with zip_ref.open(member, 'r') as source, open(target_path, "wb") as target_f:
-                        shutil.copyfileobj(source, target_f)
-                except Exception as e_copy:
-                    print(f"Ошибка при копировании файла '{member.filename}' из архива: {e_copy}")
-                    # Можно решить, прерывать ли всю распаковку или продолжать
-                    # return False # Если ошибка копирования критична
-                        
-        print(f"Архив {zip_path} успешно распакован в {extract_to_dir}.")
-        return True
-    
-    except zipfile.BadZipFile: # Это исключение от ZipFile, его нужно ловить, если is_zipfile не идеален
-        print(f"Ошибка: {zip_path} не является корректным ZIP-архивом (ошибка BadZipFile при открытии).")
-        return False
-    except IOError as e_io:
-        print(f"Ошибка ввода-вывода при распаковке {zip_path}: {e_io}")
-        return False
-    except Exception as e: # Общий обработчик для непредвиденных ошибок
-        print(f"Непредвиденная ошибка при распаковке {zip_path}: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    finally:
-        if zip_ref:
-            zip_ref.close()
-
-
-def download_and_setup_ffmpeg(work_dir):
-    if platform.system() != "Windows":
-        print("INFO: Автоматическое скачивание FFmpeg пока поддерживается только для Windows.")
-        return False
-
-    ffmpeg_target_install_dir = os.path.join(work_dir, FFMPEG_DIR) 
-    # Создаем директорию, если она не существует. os.makedirs возвращает None.
-    if not os.path.isdir(ffmpeg_target_install_dir):
-        os.makedirs(ffmpeg_target_install_dir, exist_ok=True)
-    
-    ffmpeg_exe_full_path = os.path.join(ffmpeg_target_install_dir, FFMPEG_EXE_NAME)
-    ffprobe_exe_full_path = os.path.join(ffmpeg_target_install_dir, FFPROBE_EXE_NAME)
-
-    if os.path.exists(ffmpeg_exe_full_path) and os.path.exists(ffprobe_exe_full_path):
-        print("INFO: FFmpeg и FFprobe уже существуют в рабочей директории.")
-        return True
-
-    # Используем try-with-resources для tempfile, если возможно, или генерируем имя и удаляем вручную
-    temp_zip_path_obj = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", prefix="ffmpeg_download_")
-    temp_zip_path = temp_zip_path_obj.name
-    temp_zip_path_obj.close() # Закрываем файл, чтобы _download_file мог его перезаписать
-
-    download_ok = _download_file(FFMPEG_WINDOWS_URL, temp_zip_path, "FFmpeg Essentials")
-    
-    if download_ok:
-        temp_extract_dir = os.path.join(tempfile.gettempdir(), "ffmpeg_extract_temp_" + next(tempfile._get_candidate_names()))
-        if os.path.exists(temp_extract_dir): 
-            shutil.rmtree(temp_extract_dir, ignore_errors=True) # ignore_errors для robustness
-        
-        # os.makedirs возвращает None, проверяем результат по os.path.isdir
-        os.makedirs(temp_extract_dir, exist_ok=True)
-        if not os.path.isdir(temp_extract_dir):
-            print(f"ERROR: Не удалось создать временную директорию для распаковки: {temp_extract_dir}")
-            if os.path.exists(temp_zip_path): os.remove(temp_zip_path)
-            return False
-
-        extract_success = False
-        if _extract_zip(temp_zip_path, temp_extract_dir, strip_components=1): 
-            found_bin_dir = os.path.join(temp_extract_dir, "bin") 
-            
-            if os.path.isdir(found_bin_dir):
-                print(f"INFO: Найдена папка bin FFmpeg: {found_bin_dir}")
-                copy_error = False
-                try:
-                    for item in os.listdir(found_bin_dir):
-                        s = os.path.join(found_bin_dir, item)
-                        d = os.path.join(ffmpeg_target_install_dir, item)
-                        if os.path.isfile(s):
-                            if item.lower() == FFMPEG_EXE_NAME.lower() or \
-                               item.lower() == FFPROBE_EXE_NAME.lower() or \
-                               item.lower().endswith(".dll"): 
-                                shutil.copy2(s, d) # shutil.copy2 может вызвать исключение
-                except Exception as e_copy:
-                    print(f"ERROR: Ошибка при копировании файлов FFmpeg: {e_copy}")
-                    copy_error = True
-                
-                if not copy_error:
-                    extract_success = True
-                    print(f"INFO: FFmpeg/FFprobe скопированы в {ffmpeg_target_install_dir}")
-            else:
-                print(f"ERROR: Папка 'bin' с {FFMPEG_EXE_NAME} и {FFPROBE_EXE_NAME} не найдена в {temp_extract_dir} (ожидалось после strip_components=1).")
-        
-        if os.path.exists(temp_extract_dir): shutil.rmtree(temp_extract_dir, ignore_errors=True)
-        if os.path.exists(temp_zip_path): os.remove(temp_zip_path)
-        
-        if extract_success and os.path.exists(ffmpeg_exe_full_path) and os.path.exists(ffprobe_exe_full_path):
-            print("INFO: FFmpeg успешно скачан и настроен.")
-            return True
-        else:
-            print("ERROR: FFmpeg не настроен после попытки скачивания.")
-            return False
-    else: # download_ok is False
-        if os.path.exists(temp_zip_path): os.remove(temp_zip_path) # Удаляем временный zip, если скачивание не удалось
-        return False
-
-
-def check_and_download_tools(work_dir_path, status_callback=None):
-    """Проверяет наличие FFmpeg/FFprobe и скачивает их при необходимости."""
-    if not work_dir_path or not os.path.isdir(work_dir_path):
-        if status_callback: status_callback("Ошибка: Рабочая директория не указана или не существует.")
-        return False, False, False 
-
-    if status_callback: status_callback("Проверка FFmpeg/FFprobe...")
-    ffmpeg_exe_abs_path = os.path.join(work_dir_path, FFMPEG_DIR, FFMPEG_EXE_NAME)
-    ffprobe_exe_abs_path = os.path.join(work_dir_path, FFMPEG_DIR, FFPROBE_EXE_NAME)
-    
-    ffmpeg_ok = os.path.exists(ffmpeg_exe_abs_path) and os.access(ffmpeg_exe_abs_path, os.X_OK)
-    ffprobe_ok = os.path.exists(ffprobe_exe_abs_path) and os.access(ffprobe_exe_abs_path, os.X_OK)
-
-    if not (ffmpeg_ok and ffprobe_ok):
-        if platform.system() == "Windows":
-            if status_callback: status_callback("FFmpeg/FFprobe не найдены. Попытка скачивания FFmpeg...")
-            download_successful = download_and_setup_ffmpeg(work_dir_path)
-            if download_successful:
-                ffmpeg_ok = os.path.exists(ffmpeg_exe_abs_path) and os.access(ffmpeg_exe_abs_path, os.X_OK)
-                ffprobe_ok = os.path.exists(ffprobe_exe_abs_path) and os.access(ffprobe_exe_abs_path, os.X_OK)
-            else:
-                if status_callback: status_callback("Ошибка скачивания FFmpeg.")
-        else:
-            if status_callback: status_callback("FFmpeg/FFprobe не найдены. Пожалуйста, установите их системно.")
-    
-    if status_callback: status_callback(f"FFmpeg: {'OK' if ffmpeg_ok else 'НЕ НАЙДЕН'}")
-    if status_callback: status_callback(f"FFprobe: {'OK' if ffprobe_ok else 'НЕ НАЙДЕН'}")
-
-    espeak_found_final = False 
-    if status_callback: status_callback("Проверка eSpeak NG (опционально)...")
-    
-    sys_espeak_cmd = "espeak-ng.exe" if platform.system() == "Windows" else "espeak-ng"
-    sys_espeak_path = shutil.which(sys_espeak_cmd)
-    if not sys_espeak_path and platform.system() == "Windows":
-         sys_espeak_path = shutil.which("espeak") 
-
-    if sys_espeak_path and os.access(sys_espeak_path, os.X_OK):
-        if status_callback: status_callback(f"eSpeak NG: Найден системный ({sys_espeak_path}).")
-        espeak_found_final = True
-    else:
-        if status_callback: status_callback("eSpeak NG: Не найден системно.")
-            
-    ffmpeg_ready, ffprobe_ready, espeak_is_actually_ready = initialize_paths_from_work_dir(work_dir_path) 
-    
-    return ffmpeg_ready, ffprobe_ready, espeak_is_actually_ready
-
-
-def get_config_file_path(work_dir_path=None):
-    if work_dir_path and os.path.isdir(work_dir_path):
-        return os.path.join(work_dir_path, CONFIG_FILE_NAME)
-    return None
-
-def load_app_config(current_work_dir_path=None):
-    config_path = get_config_file_path(current_work_dir_path)
-    config_data = {}
-    if config_path and os.path.exists(config_path):
-        f = None
-        try:
-            f = open(config_path, 'r', encoding='utf-8')
-            config_data = json.load(f)
-            print(f"INFO: Конфигурация загружена из {config_path}: {config_data}")
-        except json.JSONDecodeError as e_json:
-            print(f"ERROR: Не удалось декодировать JSON из {config_path}: {e_json}")
-            config_data = {} # Возвращаем пустой словарь при ошибке декодирования
-        except IOError as e_io:
-            print(f"ERROR: Ошибка чтения файла конфигурации {config_path}: {e_io}")
-            config_data = {} # Возвращаем пустой словарь при ошибке чтения
-        except Exception as e: # Прочие ошибки
-            print(f"ERROR: Непредвиденная ошибка при загрузке конфигурации из {config_path}: {e}")
-            config_data = {}
-        finally:
-            if f:
-                f.close()
-    return config_data
-
-def save_app_config(config_data, work_dir_path):
-    if not work_dir_path or not os.path.isdir(work_dir_path):
-        print(f"ERROR: Невозможно сохранить конфигурацию. Рабочая директория не указана или некорректна: {work_dir_path}")
-        return False
-        
-    config_path = get_config_file_path(work_dir_path)
-    if not config_path: 
-        print(f"ERROR: Не удалось получить путь к файлу конфигурации для сохранения в {work_dir_path}")
-        return False
-    
-    f = None
-    try:
-        f = open(config_path, 'w', encoding='utf-8')
-        json.dump(config_data, f, indent=4)
-        print(f"INFO: Конфигурация сохранена в {config_path}")
-        return True
-    except IOError as e_io:
-        print(f"ERROR: Ошибка записи файла конфигурации {config_path}: {e_io}")
-        return False
-    except TypeError as e_type: # json.dump может выдать TypeError для несериализуемых объектов
-        print(f"ERROR: Ошибка сериализации данных конфигурации для {config_path}: {e_type}")
-        return False
-    except Exception as e:
-        print(f"ERROR: Непредвиденная ошибка при сохранении конфигурации в {config_path}: {e}")
-        return False
-    finally:
-        if f:
-            f.close()
-
+# ССЫЛКИ НА МОДЕЛИ (HUGGINGFACE)
+MODELS_URLS = {
+    # 1. STT: Whisper Tiny (Sherpa ONNX)
+    "stt_whisper_tiny": {
+        "folder": "stt_whisper_tiny",
+        "files": {
+            "encoder.onnx": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx",
+            "decoder.onnx": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx",
+            "tokens.txt": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt"
+        }
+    },
+    # 2. Speaker Embedding (Sherpa ONNX)
+    "speaker_encoder": {
+        "folder": "speaker_encoder",
+        "files": {
+            "model.onnx": "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+        }
+    },
+    # 3. TTS: Russian VITS Piper (Denis - Male, Stable)
+    # Milena (female) недоступна по прямой ссылке (401), используем Denis.
+    "tts_ru": {
+        "folder": "tts_ru_denis",
+        "files": {
+            # Сохраняем как model.onnx для унификации
+            "model.onnx": "https://huggingface.co/csukuangfj/vits-piper-ru_RU-denis-medium/resolve/main/ru_RU-denis-medium.onnx",
+            "tokens.txt": "https://huggingface.co/csukuangfj/vits-piper-ru_RU-denis-medium/resolve/main/tokens.txt",
+            "model.onnx.json": "https://huggingface.co/csukuangfj/vits-piper-ru_RU-denis-medium/resolve/main/ru_RU-denis-medium.onnx.json"
+        }
+    },
+    # 4. MT: NLLB-200 (CTranslate2)
+    "mt_nllb": {
+        "folder": "mt_nllb_ct2",
+        "files": {
+            "model.bin": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/model.bin",
+            "config.json": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/config.json",
+            "shared_vocabulary.txt": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/shared_vocabulary.txt",
+            "sentencepiece.bpe.model": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/sentencepiece.bpe.model"
+        }
+    }
+}
 
 def get_work_dir_from_config():
-    possible_exe_or_script_dir = None
-    if getattr(sys, 'frozen', False):  
-        possible_exe_or_script_dir = os.path.dirname(sys.executable)
-    else: 
-        main_module = sys.modules.get('__main__') # Используем .get для избежания KeyError
-        if main_module and hasattr(main_module, '__file__') and main_module.__file__ is not None:
-            possible_exe_or_script_dir = os.path.dirname(os.path.abspath(main_module.__file__))
-        else: 
-            possible_exe_or_script_dir = os.getcwd()
+    if getattr(sys, 'frozen', False): base = os.path.dirname(sys.executable)
+    else: base = os.getcwd()
+    cfg_path = os.path.join(base, CONFIG_FILE_NAME)
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, 'r') as f: return json.load(f).get('work_dir', base)
+        except: pass
+    return base
 
-    if possible_exe_or_script_dir:
-        potential_config_path = os.path.join(possible_exe_or_script_dir, CONFIG_FILE_NAME)
-        if os.path.exists(potential_config_path):
-            config = load_app_config(possible_exe_or_script_dir) 
-            work_dir_from_local_config = config.get('work_dir')
-            if work_dir_from_local_config and os.path.isdir(work_dir_from_local_config):
-                print(f"INFO: Рабочая директория загружена из локального {potential_config_path}: {work_dir_from_local_config}")
-                return work_dir_from_local_config
-            elif not work_dir_from_local_config: 
-                print(f"INFO: Локальный конфиг {potential_config_path} найден, но work_dir не указан. Используем директорию приложения как рабочую: {possible_exe_or_script_dir}")
-                save_app_config({'work_dir': possible_exe_or_script_dir}, possible_exe_or_script_dir)
-                return possible_exe_or_script_dir
-        else: 
-            print(f"INFO: Конфиг не найден в {possible_exe_or_script_dir}. Предполагаем, что это рабочая директория по умолчанию.")
-            save_app_config({'work_dir': possible_exe_or_script_dir}, possible_exe_or_script_dir)
-            return possible_exe_or_script_dir
+def _download_file(url, dest):
+    if os.path.exists(dest):
+        size = os.path.getsize(dest)
+        # Если файл меньше 10КБ - это скорее всего ошибка (текст 404/401), перекачиваем
+        if (dest.endswith('.bin') or dest.endswith('.onnx')) and size < 10240:
+            print(f"File {os.path.basename(dest)} is too small ({size} bytes). Re-downloading...")
+            os.remove(dest)
+        else:
+            return True
 
-    print("INFO: Рабочая директория не найдена в конфигурациях и не определена по умолчанию.")
-    return None
-
-
-def save_work_dir_to_config(work_dir_path):
-    if not work_dir_path or not os.path.isdir(work_dir_path):
-        print(f"WARNING: Попытка сохранить невалидный путь к рабочей директории: {work_dir_path}")
+    print(f"Downloading {os.path.basename(dest)}...")
+    try:
+        resp = requests.get(url, stream=True, timeout=60)
+        resp.raise_for_status()
+        
+        total = int(resp.headers.get('content-length', 0))
+        
+        with open(dest, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True) as bar:
+            for chunk in resp.iter_content(1024*1024):
+                if chunk: 
+                    f.write(chunk)
+                    bar.update(len(chunk))
+        return True
+    except Exception as e:
+        print(f"Error downloading {url}: {e}")
+        if os.path.exists(dest): os.remove(dest)
         return False
 
-    config_data = {'work_dir': work_dir_path} 
-    return save_app_config(config_data, work_dir_path)
-
-
-def initialize_paths_from_work_dir(work_dir_path): 
-    global CURRENT_FFMPEG_PATH, CURRENT_FFPROBE_PATH, CURRENT_ESPEAK_PATH
+def check_and_download_models(work_dir):
+    models_root = os.path.join(work_dir, "models_onnx")
+    os.makedirs(models_root, exist_ok=True)
     
-    CURRENT_FFMPEG_PATH = None
-    CURRENT_FFPROBE_PATH = None
-    CURRENT_ESPEAK_PATH = None 
-    if 'FFMPEG_BINARY' in os.environ: 
-        # Удаляем, только если переменная действительно существует
-        try:
-            del os.environ['FFMPEG_BINARY']
-        except KeyError:
-            pass # Переменной не было, ничего страшного
-    if 'FFPROBE_BINARY' in os.environ: 
-        try:
-            del os.environ['FFPROBE_BINARY']
-        except KeyError:
-            pass
+    for key, info in MODELS_URLS.items():
+        folder_path = os.path.join(models_root, info["folder"])
+        os.makedirs(folder_path, exist_ok=True)
+        
+        for filename, url in info["files"].items():
+            dest_path = os.path.join(folder_path, filename)
+            if not _download_file(url, dest_path):
+                raise RuntimeError(f"Failed to download {filename} for {key}")
 
-    ffmpeg_found = False
-    ffprobe_found = False
-    espeak_found = False 
+    return models_root
 
-    if not work_dir_path or not os.path.isdir(work_dir_path):
-        print("INFO: Рабочая директория не указана/не существует. Попытка использовать системные инструменты.")
-        sys_ffmpeg = shutil.which(FFMPEG_EXE_NAME if platform.system() == "Windows" else "ffmpeg")
-        if sys_ffmpeg and os.access(sys_ffmpeg, os.X_OK): 
-            CURRENT_FFMPEG_PATH = sys_ffmpeg
-            os.environ['FFMPEG_BINARY'] = CURRENT_FFMPEG_PATH
-            ffmpeg_found = True
-        
-        sys_ffprobe = shutil.which(FFPROBE_EXE_NAME if platform.system() == "Windows" else "ffprobe")
-        if sys_ffprobe and os.access(sys_ffprobe, os.X_OK):
-            CURRENT_FFPROBE_PATH = sys_ffprobe
-            os.environ['FFPROBE_BINARY'] = CURRENT_FFPROBE_PATH
-            ffprobe_found = True
-        
-        env_vars_to_clear = ['HF_HOME', 'XDG_CACHE_HOME', 'TORCH_HOME', 'TTS_HOME']
-        for env_var in env_vars_to_clear:
-            if env_var in os.environ:
-                try: 
-                    del os.environ[env_var] 
-                except KeyError: 
-                    pass 
-        print("INFO: Используются стандартные пути для кэшей моделей (рабочая папка не задана).")
-        
-    else: 
-        print(f"INFO: Инициализация путей из рабочей директории: {work_dir_path}")
-
-        ffmpeg_tools_dir = os.path.join(work_dir_path, FFMPEG_DIR)
-        potential_ffmpeg_path = os.path.join(ffmpeg_tools_dir, FFMPEG_EXE_NAME)
-        if os.path.exists(potential_ffmpeg_path) and os.access(potential_ffmpeg_path, os.X_OK):
-            CURRENT_FFMPEG_PATH = potential_ffmpeg_path
-            os.environ['FFMPEG_BINARY'] = CURRENT_FFMPEG_PATH
-            ffmpeg_found = True
-        
-        potential_ffprobe_path = os.path.join(ffmpeg_tools_dir, FFPROBE_EXE_NAME)
-        if os.path.exists(potential_ffprobe_path) and os.access(potential_ffprobe_path, os.X_OK):
-            CURRENT_FFPROBE_PATH = potential_ffprobe_path
-            os.environ['FFPROBE_BINARY'] = CURRENT_FFPROBE_PATH
-            ffprobe_found = True
-
-        espeak_dir_for_check = "espeak-ng" 
-        espeak_base_dir_check = os.path.join(work_dir_path, espeak_dir_for_check)
-        potential_espeak_path_check = None
-        if platform.system() == "Windows":
-            potential_espeak_path_check = os.path.join(espeak_base_dir_check, "espeak-ng.exe") 
-        else: 
-            path1_check = os.path.join(espeak_base_dir_check, "bin", "espeak-ng")
-            path2_check = os.path.join(espeak_base_dir_check, "espeak-ng")
-            if os.path.exists(path1_check) and os.access(path1_check, os.X_OK): potential_espeak_path_check = path1_check
-            elif os.path.exists(path2_check) and os.access(path2_check, os.X_OK): potential_espeak_path_check = path2_check
-
-        if potential_espeak_path_check and os.path.exists(potential_espeak_path_check) and os.access(potential_espeak_path_check, os.X_OK):
-            CURRENT_ESPEAK_PATH = os.path.abspath(potential_espeak_path_check) 
-            espeak_found = True
-        
-        cache_base_dir = os.path.join(work_dir_path, ".cache") 
-        hf_cache_dir = os.path.join(cache_base_dir, "huggingface")
-        tts_models_dir = os.path.join(cache_base_dir, "tts_models_coqui") 
-        torch_cache_dir = os.path.join(cache_base_dir, "torch") 
-
-        os.makedirs(hf_cache_dir, exist_ok=True)
-        os.makedirs(tts_models_dir, exist_ok=True)
-        os.makedirs(torch_cache_dir, exist_ok=True)
-        
-        os.environ['HF_HOME'] = hf_cache_dir 
-        os.environ['XDG_CACHE_HOME'] = cache_base_dir 
-        os.environ['TORCH_HOME'] = torch_cache_dir
-        os.environ['TTS_HOME'] = tts_models_dir 
-        
-        print(f"INFO: HF_HOME установлен: {hf_cache_dir}")
-        print(f"INFO: TTS_HOME (для Coqui TTS) установлен: {tts_models_dir}")
-    
-    if ffmpeg_found: print(f"INFO: FFMPEG используется из: {CURRENT_FFMPEG_PATH}")
-    else: print("WARNING: FFMPEG НЕ НАСТРОЕН.")
-    if ffprobe_found: print(f"INFO: FFPROBE используется из: {CURRENT_FFPROBE_PATH}")
-    else: print("WARNING: FFPROBE НЕ НАСТРОЕН.")
-    if espeak_found: print(f"INFO: ESPEAK найден: {CURRENT_ESPEAK_PATH} (не используется по умолчанию).")
-    
-    return ffmpeg_found, ffprobe_found, espeak_found 
+def initialize_paths_from_work_dir(work_dir):
+    return True, True, False

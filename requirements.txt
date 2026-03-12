@@ -1,23 +1,22 @@
-# Основные ML/TTS/транскрипция
-torch
-torchaudio
-tts >= 0.22.0
-whisperx >= 3.1.0
-pyannote.audio >= 3.0.0 
-transformers >= 4.0.0
+# Core Engines (No PyTorch)
+numpy
+pandas
+onnxruntime-gpu; sys_platform == 'linux' or platform_machine == 'x86_64'
+# Если установка onnxruntime-gpu падает, замените на onnxruntime
+sherpa-onnx
+ctranslate2
+sentencepiece
 
-# Обработка видео/аудио
+# Logic & Math
+scikit-learn
+soundfile
+tqdm
+
+# Media Processing
 ffmpeg-python
-
-# Скачивание с YouTube
 yt-dlp
 
-# Вспомогательные
-soundfile 
-tqdm 
-srt >= 3.5.0 # Для парсинга SRT файлов, указана минимальная версия
-pyperclip # Для копирования в буфер обмена
-langdetect # Для определения языка текста
-
-# Для dev (управляется pre-commit)
-# pipreqs
+# Utils
+pyperclip
+langdetect
+requests
