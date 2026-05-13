@@ -5,49 +5,24 @@ import requests
 from tqdm import tqdm 
 import sys 
 
-# Константы
 CONFIG_FILE_NAME = "app_settings.json" 
-FFMPEG_DIR = "ffmpeg" 
-FFMPEG_EXE_NAME = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
-FFPROBE_EXE_NAME = "ffprobe.exe" if platform.system() == "Windows" else "ffprobe"
 
-# ССЫЛКИ НА МОДЕЛИ (HUGGINGFACE)
+# ССЫЛКИ НА МОДЕЛИ
 MODELS_URLS = {
-    # 1. STT: Whisper Tiny (Sherpa ONNX)
-    "stt_whisper_tiny": {
-        "folder": "stt_whisper_tiny",
-        "files": {
-            "encoder.onnx": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx",
-            "decoder.onnx": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx",
-            "tokens.txt": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt"
-        }
-    },
-    # 2. Speaker Embedding (Sherpa ONNX)
-    "speaker_encoder": {
-        "folder": "speaker_encoder",
-        "files": {
-            "model.onnx": "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
-        }
-    },
-    # 3. TTS: Russian VITS Piper (Denis - Male, Stable)
-    # Milena (female) недоступна по прямой ссылке (401), используем Denis.
+    # TTS: Russian VITS Piper (Denis)
     "tts_ru": {
         "folder": "tts_ru_denis",
         "files": {
-            # Сохраняем как model.onnx для унификации
             "model.onnx": "https://huggingface.co/csukuangfj/vits-piper-ru_RU-denis-medium/resolve/main/ru_RU-denis-medium.onnx",
             "tokens.txt": "https://huggingface.co/csukuangfj/vits-piper-ru_RU-denis-medium/resolve/main/tokens.txt",
             "model.onnx.json": "https://huggingface.co/csukuangfj/vits-piper-ru_RU-denis-medium/resolve/main/ru_RU-denis-medium.onnx.json"
         }
     },
-    # 4. MT: NLLB-200 (CTranslate2)
-    "mt_nllb": {
-        "folder": "mt_nllb_ct2",
+    # LLM для перевода: Qwen 3.5 4B (Unsloth 4-bit GGUF)
+    "llm_translator": {
+        "folder": "llm_translator",
         "files": {
-            "model.bin": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/model.bin",
-            "config.json": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/config.json",
-            "shared_vocabulary.txt": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/shared_vocabulary.txt",
-            "sentencepiece.bpe.model": "https://huggingface.co/softcatala/nllb-200-distilled-600M-ct2-int8/resolve/main/sentencepiece.bpe.model"
+            "Qwen3.5-4B-Q4_K_M.gguf": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"
         }
     }
 }
@@ -65,9 +40,8 @@ def get_work_dir_from_config():
 def _download_file(url, dest):
     if os.path.exists(dest):
         size = os.path.getsize(dest)
-        # Если файл меньше 10КБ - это скорее всего ошибка (текст 404/401), перекачиваем
-        if (dest.endswith('.bin') or dest.endswith('.onnx')) and size < 10240:
-            print(f"File {os.path.basename(dest)} is too small ({size} bytes). Re-downloading...")
+        if dest.endswith('.gguf') and size < 1024 * 1024 * 100:
+            print(f"File {os.path.basename(dest)} seems corrupted. Re-downloading...")
             os.remove(dest)
         else:
             return True
@@ -94,6 +68,10 @@ def check_and_download_models(work_dir):
     models_root = os.path.join(work_dir, "models_onnx")
     os.makedirs(models_root, exist_ok=True)
     
+    pyannote_dir = os.path.join(models_root, "pyannote")
+    if not os.path.exists(os.path.join(pyannote_dir, "config.yaml")):
+        print("WARNING: Папка pyannote пуста! Убедитесь, что вы вручную скачали config.yaml, segmentation.bin и wespeaker.bin в", pyannote_dir)
+    
     for key, info in MODELS_URLS.items():
         folder_path = os.path.join(models_root, info["folder"])
         os.makedirs(folder_path, exist_ok=True)
@@ -104,6 +82,3 @@ def check_and_download_models(work_dir):
                 raise RuntimeError(f"Failed to download {filename} for {key}")
 
     return models_root
-
-def initialize_paths_from_work_dir(work_dir):
-    return True, True, False

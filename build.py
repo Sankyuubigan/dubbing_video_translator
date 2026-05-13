@@ -7,7 +7,7 @@ import datetime
 APP_BASE_NAME = "VideoDubbingTool" 
 MAIN_SCRIPT = "main.py"
 ICON_PATH = "icon.ico" 
-BUILD_ONEDIR = False # False для --onefile
+BUILD_ONEDIR = False
 
 APP_VERSION_DATE = datetime.datetime.now().strftime("%d.%m.%y")
 APP_NAME_WITH_VERSION = f"{APP_BASE_NAME}_v{APP_VERSION_DATE}"
@@ -28,49 +28,31 @@ if os.path.exists(dist_output_path):
         except OSError: pass
 if os.path.exists(build_dir): shutil.rmtree(build_dir)
 
-pyinstaller_base_options = [
+pyinstaller_base_options =[
     MAIN_SCRIPT,
     f"--name={APP_NAME_WITH_VERSION}", 
     "--windowed",
-    f"--icon={ICON_PATH}",
     
     # --- Hidden Imports ---
     "--hidden-import=torch",
     "--hidden-import=torchaudio",
-    "--hidden-import=transformers",
-    "--hidden-import=TTS",
-    "--hidden-import=TTS.api",
     "--hidden-import=whisperx",
+    "--hidden-import=pyannote.audio",
+    "--hidden-import=llama_cpp",
+    "--hidden-import=sherpa_onnx",
     "--hidden-import=soundfile",
-    "--hidden-import=huggingface_hub",
-    "--hidden-import=langdetect",
-    "--hidden-import=deepmultilingualpunctuation",
     "--hidden-import=srt",
     "--hidden-import=ffmpeg", 
     "--hidden-import=yt_dlp",
-    "--hidden-import=pyperclip",
     "--hidden-import=pandas",
     "--hidden-import=numpy",
-    
-    # Новые зависимости для оффлайн диаризации
-    "--hidden-import=speechbrain",
-    "--hidden-import=speechbrain.inference",
-    "--hidden-import=speechbrain.inference.speaker",
-    "--hidden-import=speechbrain.lobes.models.ECAPA_TDNN",
-    "--hidden-import=sklearn",
-    "--hidden-import=sklearn.cluster",
-    "--hidden-import=sklearn.neighbors.typedefs",
-    "--hidden-import=sklearn.neighbors.quad_tree",
-    "--hidden-import=sklearn.tree._utils",
-    "--hidden-import=scipy.special.cython_special",
-    
-    # Удалены pyannote зависимости
+    "--hidden-import=scikit-learn",
     
     '--log-level=INFO',
     '--noupx',
 ]
 
-if BUILD_ONEDIR: pyinstaller_options = pyinstaller_base_options + ["--onedir"]
+if BUILD_ONEDIR: pyinstaller_options = pyinstaller_base_options +["--onedir"]
 else: pyinstaller_options = pyinstaller_base_options + ["--onefile"]
 
 print(f"Собираем {APP_NAME_WITH_VERSION}...")

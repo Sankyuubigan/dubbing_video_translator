@@ -14,8 +14,8 @@ import voice_cloner
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("No-Torch Video Dubbing (ONNX)")
-        self.root.geometry("600x500")
+        self.root.title("Pro Video Dubbing (WhisperX + Llama + Pyannote)")
+        self.root.geometry("650x550")
         
         self.work_dir = config_manager.get_work_dir_from_config()
         self.models_dir = os.path.join(self.work_dir, "models_onnx")
@@ -38,17 +38,16 @@ class App:
         
         ttk.Button(p, text="Start Processing", command=self.on_start).pack(pady=10)
         
-        self.log = scrolledtext.ScrolledText(p, height=15)
+        self.log = scrolledtext.ScrolledText(p, height=20)
         self.log.pack(fill=tk.BOTH, expand=True)
         
-        # --- Context Menu for Logs ---
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self.copy_selection)
         self.context_menu.add_command(label="Copy All", command=self.copy_all)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Clear", command=self.clear_log)
         
-        self.log.bind("<Button-3>", self.show_context_menu) # Right click
+        self.log.bind("<Button-3>", self.show_context_menu)
 
     def show_context_menu(self, event):
         self.context_menu.tk_popup(event.x_root, event.y_root)
@@ -59,7 +58,7 @@ class App:
             self.root.clipboard_clear()
             self.root.clipboard_append(sel)
         except tk.TclError:
-            pass # No selection
+            pass
 
     def copy_all(self):
         text = self.log.get("1.0", tk.END)
@@ -74,10 +73,10 @@ class App:
         self.log.see(tk.END)
 
     def check_models(self):
-        self.log_msg("Checking/Downloading ONNX models...")
+        self.log_msg("Checking local models & downloading missing ones...")
         try:
             config_manager.check_and_download_models(self.work_dir)
-            self.log_msg("Models ready.")
+            self.log_msg("Models check completed.")
         except Exception as e:
             self.log_msg(f"Error checking models: {e}")
 
@@ -87,32 +86,28 @@ class App:
     def process(self):
         vid = self.vid_var.get()
         if not os.path.exists(vid):
-            self.log_msg("Video not found")
+            self.log_msg("Error: Video not found")
             return
             
         temp_dir = tempfile.mkdtemp()
         try:
             self.log_msg("1. Extracting audio...")
             wav_path = os.path.join(temp_dir, "source_16k.wav")
-            video_processor.extract_audio(vid, wav_path, 16000) # For STT
+            video_processor.extract_audio(vid, wav_path, 16000)
             
-            self.log_msg("2. Transcribing (Sherpa-ONNX)...")
-            segments = transcriber.transcribe_with_sherpa(wav_path, self.models_dir)
-            self.log_msg(f"   Found {len(segments)} segments.")
+            self.log_msg("2. Transcribing & Diarizing (WhisperX + Pyannote)...")
+            segments = transcriber.transcribe_and_diarize(wav_path, self.models_dir)
+            self.log_msg(f"   Found {len(segments)} segments with speaker tags.")
             
-            self.log_msg("3. Diarizing (Speaker ID)...")
-            segments, _ = transcriber.diarize_segments(wav_path, segments, self.models_dir)
-            
-            self.log_msg("4. Translating (NLLB CTranslate2)...")
+            self.log_msg("3. Contextual Translating (Llama.cpp Qwen)...")
             segments, _ = translator.translate_segments(segments, self.models_dir)
             
-            self.log_msg("5. Synthesizing (VITS ONNX)...")
+            self.log_msg("4. Synthesizing (VITS ONNX)...")
             dub_wav = voice_cloner.synthesize_segments(segments, self.models_dir, temp_dir)
             
-            self.log_msg("6. Mixing...")
+            self.log_msg("5. Mixing...")
             out_vid = os.path.join(self.work_dir, "result_dubbed.mp4")
             
-            # Original audio (background)
             orig_bg = os.path.join(temp_dir, "bg.wav")
             video_processor.extract_audio(vid, orig_bg, 44100)
             
