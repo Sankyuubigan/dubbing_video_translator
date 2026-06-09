@@ -11,6 +11,7 @@ fn emit(stage: &str, percent: f32) {
                 stage: stage.to_string(),
                 percent,
                 result_path: None,
+                error_message: None,
             },
         );
     }
@@ -32,14 +33,15 @@ pub fn run(ctx: PipelineContext) -> Result<PipelineContext> {
     let ctx = timed_stage!("extract", 5.0, ctx, crate::audio_extractor::extract)
         .map_err(|e| { log::error!("[pipeline] audio_extractor: {:#}", e); e })?;
 
-    let ctx = timed_stage!("vad", 15.0, ctx, crate::vad_ffmpeg::detect)
-        .map_err(|e| { log::error!("[pipeline] vad_ffmpeg: {:#}", e); e })?;
+    let ctx = timed_stage!("vad", 15.0, ctx, crate::vad::detect)
+        .map_err(|e| { log::error!("[pipeline] vad: {:#}", e); e })?;
 
-    let ctx = timed_stage!("stt", 30.0, ctx, crate::stt::transcribe)
-        .map_err(|e| { log::error!("[pipeline] stt: {:#}", e); e })?;
-
-    let ctx = timed_stage!("diarize", 50.0, ctx, crate::diarization::diarize)
+    // Диаризация ДО STT — чтобы STT резал аудио по границам спикеров
+    let ctx = timed_stage!("diarize", 30.0, ctx, crate::diarization::diarize)
         .map_err(|e| { log::error!("[pipeline] diarization: {:#}", e); e })?;
+
+    let ctx = timed_stage!("stt", 50.0, ctx, crate::stt::transcribe)
+        .map_err(|e| { log::error!("[pipeline] stt: {:#}", e); e })?;
 
     let ctx = timed_stage!("translate", 70.0, ctx, crate::translation::translate)
         .map_err(|e| { log::error!("[pipeline] translation: {:#}", e); e })?;

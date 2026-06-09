@@ -16,6 +16,7 @@ interface ProgressUpdate {
   stage: string;
   percent: number;
   result_path?: string;
+  error_message?: string;
 }
 
 export default function App() {
@@ -23,8 +24,9 @@ export default function App() {
   const [videoPath, setVideoPath] = useState<string>("");
   const [ggufPath, setGgufPath] = useState<string>("");
   const [sherpaOnnxDir, setSherpaOnnxDir] = useState<string>("");
+  const [sttModel, setSttModel] = useState<string>("qwen3-asr");
   const [ffmpegPath, setFfmpegPath] = useState<string>("");
-  const [vadThreshold, setVadThreshold] = useState<string>("-30");
+  const [vadThreshold, setVadThreshold] = useState<string>("-40");
   const [format, setFormat] = useState<string>("mp4");
   const [stage, setStage] = useState<Stage>("idle");
   const [progress, setProgress] = useState(0);
@@ -38,13 +40,14 @@ export default function App() {
 
   useEffect(() => {
     const unlisten = listen<ProgressUpdate>("pipeline-progress", (e) => {
-      const { stage, percent, result_path } = e.payload;
+      const { stage, percent, result_path, error_message } = e.payload;
       if (stage === "done") {
         setStage("done");
         setProgress(100);
         if (result_path) setResultPath(result_path);
       } else if (stage === "error") {
         setStage("error");
+        setError(error_message || "Неизвестная ошибка. Подробности в логах.");
       } else {
         setProgressStage(stage);
         setProgress(percent);
@@ -96,6 +99,7 @@ export default function App() {
       output_format: string;
       vad_threshold_db: string | null;
       sherpa_onnx_dir: string | null;
+      stt_model: string | null;
     }>("get_config")
       .then((cfg) => {
         if (cfg.gguf_model_path) setGgufPath(cfg.gguf_model_path);
@@ -103,6 +107,7 @@ export default function App() {
         if (cfg.output_format) setFormat(cfg.output_format);
         if (cfg.vad_threshold_db) setVadThreshold(cfg.vad_threshold_db);
         if (cfg.sherpa_onnx_dir) setSherpaOnnxDir(cfg.sherpa_onnx_dir);
+        if (cfg.stt_model) setSttModel(cfg.stt_model);
       })
       .catch(() => {});
   }, []);
@@ -117,11 +122,12 @@ export default function App() {
           output_format: format,
           vad_threshold_db: vadThreshold || null,
           sherpa_onnx_dir: sherpaOnnxDir || null,
+          stt_model: sttModel || null,
         },
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir]);
+  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir, sttModel]);
 
   const handleSelectVideo = async () => {
     const file = await open({
@@ -158,6 +164,7 @@ export default function App() {
       outputFormat: format,
       vadThresholdDb: vadThreshold || null,
       sherpaOnnxDir: sherpaOnnxDir || null,
+      sttModel: sttModel,
     }).catch((e) => {
       setError(String(e));
       setStage("error");
@@ -221,7 +228,19 @@ export default function App() {
           )}
 
           <div className="card">
-            <label>Sherpa-ONNX модель (папка с conv_frontend.onnx и tokenizer/)</label>
+            <label>Модель ASR</label>
+            <select
+              className="select"
+              value={sttModel}
+              onChange={(e) => setSttModel(e.target.value)}
+            >
+              <option value="qwen3-asr">Qwen3-ASR (мультиязычный)</option>
+              <option value="parakeet-tdt">Parakeet TDT (английский, быстрый)</option>
+            </select>
+          </div>
+
+          <div className="card">
+            <label>Папка с моделью ASR</label>
             <div className="file-row">
               {sherpaOnnxDir ? (
                 <span className="file-name">
@@ -362,15 +381,17 @@ export default function App() {
             </div>
           )}
 
-          {stage === "error" && error && (
+          {error && (
             <div className="card error-card">
               <p className="error-text">{error}</p>
-              <button
-                className="btn-secondary"
-                onClick={() => { setStage("select"); setError(""); }}
-              >
-                Назад
-              </button>
+              {stage === "error" && (
+                <button
+                  className="btn-secondary"
+                  onClick={() => { setStage("select"); setError(""); }}
+                >
+                  Назад
+                </button>
+              )}
             </div>
           )}
         </>

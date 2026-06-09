@@ -1,13 +1,13 @@
 mod audio_extractor;
-mod comm;
-mod config;
+pub mod comm;
+pub mod config;
 mod diarization;
 mod ffmpeg;
 mod output;
-mod pipeline;
+pub mod pipeline;
 mod stt;
 mod translation;
-mod vad_ffmpeg;
+mod vad;
 
 use comm::{PipelineConfig, PipelineContext, ProgressUpdate};
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -203,6 +203,7 @@ fn process_video(
     output_format: Option<String>,
     vad_threshold_db: Option<String>,
     sherpa_onnx_dir: Option<String>,
+    stt_model: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<String, String> {
@@ -221,6 +222,9 @@ fn process_video(
         ffmpeg_path: app_cfg.ffmpeg_path.clone(),
         vad_threshold_db,
         sherpa_onnx_dir: onnx_dir,
+        stt_model: stt_model.or(app_cfg.stt_model.clone()),
+        diarization_threshold: app_cfg.diarization_threshold,
+        diarization_num_speakers: app_cfg.diarization_num_speakers,
     };
 
     let handle = app_handle.clone();
@@ -239,12 +243,14 @@ fn process_video(
                             stage: "done".to_string(),
                             percent: 100.0,
                             result_path: Some(path),
+                            error_message: None,
                         },
                     )
                     .ok();
             }
             Err(e) => {
-                log::error!("process_video: {}", e);
+                let err_msg = format!("{:#}", e);
+                log::error!("process_video: {}", err_msg);
                 handle
                     .emit(
                         "pipeline-progress",
@@ -252,6 +258,7 @@ fn process_video(
                             stage: "error".to_string(),
                             percent: 0.0,
                             result_path: None,
+                            error_message: Some(err_msg),
                         },
                     )
                     .ok();
@@ -284,11 +291,9 @@ fn get_log_paths() -> Vec<String> {
     log_paths().into_iter().map(|p| p.to_string_lossy().to_string()).collect()
 }
 
-// ---- Entry ----
+// ---- Logger setup (shared between GUI and headless) ----
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // Init panic hook FIRST — до всего остального
+pub fn setup_logger() {
     panic::set_hook(Box::new(move |info| {
         let msg = format!("PANIC: {}", info);
         eprintln!("{}", msg);
@@ -300,7 +305,6 @@ pub fn run() {
         }
     }));
 
-    // Set up logger
     if let Err(e) = log::set_logger(&AppLogger) {
         let msg = format!("WARN: log::set_logger failed: {}", e);
         eprintln!("{}", msg);
@@ -308,11 +312,17 @@ pub fn run() {
     }
     log::set_max_level(LevelFilter::Info);
 
-    // Write startup messages — теперь через работающий логгер
     log::info!("=== DubVidTra2 Start ===");
     for p in log_paths() {
         log::info!("Log file: {}", p.display());
     }
+}
+
+// ---- Entry ----
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    setup_logger();
 
     let app_cfg = config::load();
 
@@ -352,7 +362,10 @@ pub fn run() {
                             gguf_model_path: Some(translate),
                             ffmpeg_path: cfg.ffmpeg_path.clone(),
                             vad_threshold_db: cfg.vad_threshold_db.clone(),
-                            sherpa_onnx_dir: cfg.sherpa_onnx_dir,
+                            sherpa_onnx_dir: cfg.sherpa_onnx_dir.clone(),
+                            stt_model: cfg.stt_model.clone(),
+                            diarization_threshold: cfg.diarization_threshold,
+                            diarization_num_speakers: cfg.diarization_num_speakers,
                         };
                         let ctx = comm::PipelineContext::new(pcfg);
                         log::info!("AUTO: running pipeline...");
@@ -362,6 +375,7 @@ pub fn run() {
                                 stage: "started".to_string(),
                                 percent: 0.0,
                                 result_path: None,
+                                error_message: None,
                             },
                         );
                         let result = pipeline::run(ctx);
@@ -375,17 +389,20 @@ pub fn run() {
                                         stage: "done".to_string(),
                                         percent: 100.0,
                                         result_path: Some(out),
+                                        error_message: None,
                                     },
                                 );
                             }
                             Err(e) => {
-                                log::error!("AUTO: {:#}", e);
+                                let err_msg = format!("{:#}", e);
+                                log::error!("AUTO: {}", err_msg);
                                 let _ = app_handle.emit(
                                     "pipeline-progress",
                                     comm::ProgressUpdate {
                                         stage: "error".to_string(),
                                         percent: 0.0,
                                         result_path: None,
+                                        error_message: Some(err_msg),
                                     },
                                 );
                             }
@@ -420,18 +437,19 @@ mod tests {
             .to_path_buf()
     }
 
-    #[test]
-    fn test_full_pipeline() {
+    fn run_pipeline(cfg: &config::AppConfig, stt_model: &str, label: &str) {
         let video = project_root().join("test").join("for_test.mp4");
         assert!(video.exists(), "Тестовый файл не найден: {:?}", video);
 
-        let cfg = config::load();
         let translate = cfg.gguf_model_path.clone()
             .expect("Нет gguf_model_path в конфиге!");
 
-        eprintln!("[TEST] Video: {}", video.display());
-        eprintln!("[TEST] Translate: {}", translate);
-        eprintln!("[TEST] Sherpa-ONNX: {:?}", cfg.sherpa_onnx_dir);
+        let onnx_dir = cfg.sherpa_onnx_dir.clone();
+
+        eprintln!("[TEST {}] Video: {}", label, video.display());
+        eprintln!("[TEST {}] Translate: {}", label, translate);
+        eprintln!("[TEST {}] Sherpa-ONNX: {:?}", label, onnx_dir);
+        eprintln!("[TEST {}] STT model: {}", label, stt_model);
 
         let pipeline_cfg = PipelineConfig {
             input_path: video.to_string_lossy().to_string(),
@@ -439,15 +457,65 @@ mod tests {
             gguf_model_path: Some(translate),
             ffmpeg_path: None,
             vad_threshold_db: None,
-            sherpa_onnx_dir: cfg.sherpa_onnx_dir.clone(),
+            sherpa_onnx_dir: onnx_dir,
+            stt_model: Some(stt_model.to_string()),
+            diarization_threshold: cfg.diarization_threshold,
+            diarization_num_speakers: cfg.diarization_num_speakers,
         };
         let ctx = PipelineContext::new(pipeline_cfg);
 
         let result = pipeline::run(ctx);
         if let Err(ref e) = result {
-            eprintln!("[TEST] PIPELINE ERROR: {:#}", e);
+            eprintln!("[TEST {}] PIPELINE ERROR: {:#}", label, e);
         }
-        assert!(result.is_ok(), "Pipeline failed: {:#}", result.err().unwrap());
-        eprintln!("[TEST] SUCCESS: {:?}", result.unwrap().output_path);
+        let result = result.expect(&format!("[TEST {}] Pipeline failed", label));
+        let output_path = result.output_path.expect("Нет output_path");
+        eprintln!("[TEST {}] SUCCESS: {:?}", label, output_path);
+
+        // Читаем сгенерированные субтитры
+        let en_srt = output_path.replace(".mp4", "_en.srt");
+        let ru_srt = output_path.replace(".mp4", "_ru.srt");
+        for srt_path in &[&en_srt, &ru_srt] {
+            // Ищем SRT рядом с выходным файлом (если есть) или во временной папке
+            let alt_path = std::path::Path::new(&output_path)
+                .parent()
+                .map(|p| {
+                    let name = if srt_path.contains("_en.srt") { "subtitles_en.srt" } else { "subtitles_ru.srt" };
+                    p.join(name)
+                });
+
+            let srt_content = std::fs::read_to_string(srt_path)
+                .or_else(|_| alt_path.map_or(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no alt")), |p| std::fs::read_to_string(p)))
+                .or_else(|_| std::fs::read_to_string(std::path::Path::new(&output_path).with_extension("srt")));
+
+            if let Ok(content) = srt_content {
+                if content.trim().is_empty() {
+                    eprintln!("[TEST {}] {} — пустой!", label, srt_path);
+                } else {
+                    let lines: Vec<&str> = content.lines().collect();
+                    eprintln!("[TEST {}] {} — {} строк:", label, srt_path, lines.len());
+                    for chunk in lines.chunks(4) {
+                        let text = chunk.join(" | ");
+                        eprintln!("  {}", text);
+                    }
+                }
+            } else {
+                eprintln!("[TEST {}] {} — не найден (ищем рядом с output)", label, srt_path);
+            }
+        }
+    }
+
+    #[test]
+    fn test_qwen3_asr() {
+        let cfg = config::load();
+        run_pipeline(&cfg, "qwen3-asr", "Qwen3-ASR");
+    }
+
+    #[test]
+    fn test_parakeet_tdt() {
+        // Для Parakeet используем соответствующий путь
+        let mut cfg = config::load();
+        cfg.sherpa_onnx_dir = Some(r"D:\nn\models\stt\parakeet-tdt-0.6b-v3-sherpa-onnx-fp16".to_string());
+        run_pipeline(&cfg, "parakeet-tdt", "Parakeet-TDT");
     }
 }

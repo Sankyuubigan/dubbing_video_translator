@@ -86,6 +86,9 @@ mod tests {
             ffmpeg_path: None,
             vad_threshold_db: None,
             sherpa_onnx_dir: None,
+            stt_model: None,
+            diarization_threshold: None,
+            diarization_num_speakers: None,
         };
         let ctx = PipelineContext::new(cfg);
         let result = extract(ctx);

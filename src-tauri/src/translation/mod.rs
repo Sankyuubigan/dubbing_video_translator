@@ -9,73 +9,24 @@ use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
 
-/// Tries to parse JSON array from LLM output with cleanup for common errors.
-fn parse_llm_json(output: &str) -> Option<Vec<SubtitleChunk>> {
-    let js = output.find('[')?;
-    let je = output[js..].rfind(']')?;
-    let raw = output[js..=js + je].to_string();
-    let raw = raw.replace("\"\"", "\"");
-    if let Ok(parsed) = serde_json::from_str::<Vec<SubtitleChunk>>(&raw) {
-        return Some(parsed);
-    }
-    let cleaned = fix_json_quotes(&raw);
-    if let Ok(parsed) = serde_json::from_str::<Vec<SubtitleChunk>>(&cleaned) {
-        return Some(parsed);
-    }
-    let mut results = Vec::new();
-    let mut pos = 0;
-    let bytes = raw.as_bytes();
-    while pos < bytes.len() {
-        let obj_start = match bytes[pos..].iter().position(|&b| b == b'{') {
-            Some(i) => pos + i,
-            None => break,
-        };
-        let mut depth = 0i32;
-        let mut obj_end: Option<usize> = None;
-        for i in obj_start..bytes.len() {
-            match bytes[i] {
-                b'{' => depth += 1,
-                b'}' => { depth -= 1; if depth == 0 { obj_end = Some(i + 1); break; } }
-                _ => {}
+/// Парсит вывод LLM вида:
+/// [0] translated text
+/// [1] more text
+/// и возвращает HashMap<index, text>.
+fn parse_tagged_translation(output: &str) -> std::collections::HashMap<usize, String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"^\[(\d+)\]\s*(.*)").unwrap());
+    let mut result = std::collections::HashMap::new();
+    for line in output.lines() {
+        if let Some(caps) = re.captures(line.trim()) {
+            let idx: usize = caps[1].parse().unwrap_or(usize::MAX);
+            let text = caps[2].trim().to_string();
+            if idx != usize::MAX && !text.is_empty() {
+                result.insert(idx, text);
             }
         }
-        let obj_end = match obj_end { Some(e) => e, None => break };
-        let obj_str = &raw[obj_start..obj_end];
-        let obj_clean = fix_json_quotes(obj_str);
-        if let Ok(chunk) = serde_json::from_str::<SubtitleChunk>(&obj_clean) {
-            results.push(chunk);
-        }
-        pos = obj_end;
     }
-    if !results.is_empty() { return Some(results); }
-    None
-}
-
-/// Escapes unescaped double quotes inside JSON string values (heuristic).
-fn fix_json_quotes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 32);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'"' {
-            out.push('"');
-            i += 1;
-            if i >= 2 && bytes[i - 2] == b'\\' { continue; }
-            loop {
-                if i >= bytes.len() { break; }
-                if bytes[i] == b'\\' {
-                    out.push('\\'); i += 1;
-                    if i < bytes.len() { out.push(bytes[i] as char); i += 1; }
-                    continue;
-                }
-                if bytes[i] == b'"' { out.push('"'); i += 1; break; }
-                out.push(bytes[i] as char); i += 1;
-            }
-        } else {
-            out.push(bytes[i] as char); i += 1;
-        }
-    }
-    out
+    result
 }
 
 pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
@@ -86,7 +37,6 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
             anyhow::bail!("Нет чанков STT");
         }
     };
-    let speakers = ctx.speaker_segments.as_ref();
     let model_path = match ctx.config.gguf_model_path.as_ref() {
         Some(p) => p,
         None => {
@@ -135,8 +85,8 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
     log::info!("Перевод: {} чанков, n_vocab={}, eos={}", chunks.len(), n_vocab, eos);
     let mut result = Vec::new();
 
-    for batch in chunks.chunks(10) {
-        let batch_json = format_batch(batch, speakers);
+    for batch in chunks.chunks(5) {
+        let batch_text = format_batch(batch);
 
         let mut ctx_llm = match model.new_context(
             backend,
@@ -150,12 +100,11 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         };
 
         let prompt = format!(
-            "Translate the following English text to Russian. Output ONLY a valid JSON array, no extra text.\n\
-             IMPORTANT: If the translated text contains double quotes, escape them with backslash.\n\
-             Format: [{{\"start_sec\":0,\"end_sec\":1,\"text\":\"translated text\",\"speaker_id\":\"S1\"}}]\n\n\
-             Input: {}\n\n\
+            "Translate the following English text to Russian line by line. \
+             Keep the exact numerical tags. Output ONLY the translated text with tags.\n\n\
+             Input:\n{}\n\n\
              Output:",
-            batch_json
+            batch_text
         );
 
         let tokens = match model.str_to_token(&prompt, AddBos::Always) {
@@ -165,6 +114,8 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
                 anyhow::bail!("Ошибка токенизации: {:#}", e);
             }
         };
+
+        let input_token_count = tokens.len();
 
         if tokens.len() > 14000 {
             log::warn!("Перевод: промпт слишком длинный ({} токенов), уменьшаем batch", tokens.len());
@@ -197,7 +148,8 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         let mut pos = batch_llm.n_tokens() as i32;
         let mut generation_ok = true;
 
-        for _ in 0..4096 {
+        let max_new = (input_token_count * 2).max(128).min(4096);
+        for _ in 0..max_new {
             let logits_last = ctx_llm.get_logits();
 
             let next_idx = logits_last
@@ -236,20 +188,36 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
             String::new()
         };
 
-        if let Some(parsed) = parse_llm_json(&output) {
-            result.extend(parsed);
+        let parsed = parse_tagged_translation(&output);
+        if parsed.is_empty() {
+            log::warn!("Перевод: LLM не вернула тегированный вывод ({} bytes). Вывод LLM:\n{}",
+                output.len(), &output);
+            log::warn!("Перевод: используем оригинал");
+            for chunk in batch {
+                if chunk.text.trim().is_empty() {
+                    continue;
+                }
+                result.push(SubtitleChunk {
+                    text: format!("[{}]", chunk.text),
+                    ..chunk.clone()
+                });
+            }
             continue;
         }
 
-        log::warn!("Перевод: LLM JSON не парсится ({} bytes). Вывод LLM:\n{}",
-            output.len(), &output);
-        log::warn!("Перевод: используем оригинал");
-        for chunk in batch {
+        for (idx, chunk) in batch.iter().enumerate() {
             if chunk.text.trim().is_empty() {
                 continue;
             }
+            let text = match parsed.get(&idx) {
+                Some(t) => t.clone(),
+                None => {
+                    log::warn!("Перевод: LLM пропустила индекс {}, оставляем оригинал", idx);
+                    chunk.text.clone()
+                }
+            };
             result.push(SubtitleChunk {
-                text: format!("[{}]", chunk.text),
+                text,
                 ..chunk.clone()
             });
         }
@@ -281,10 +249,8 @@ fn decode_tokens(model: &LlamaModel, tokens: &[LlamaToken]) -> String {
         let mut decoder = UTF_8.new_decoder();
         if let Ok(piece) = model.token_to_piece(token, &mut decoder, false, None) {
             if piece.chars().any(|c| c as u32 > 0xFF) {
-                // Already valid UTF-8 (Cyrillic, etc.) — take bytes as-is
                 out.extend_from_slice(piece.as_bytes());
             } else {
-                // Byte-level token: Latin-1 chars → bytes → valid UTF-8
                 out.extend(piece.chars().map(|c| c as u8));
             }
         }
@@ -293,38 +259,14 @@ fn decode_tokens(model: &LlamaModel, tokens: &[LlamaToken]) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn format_batch(
-    chunks: &[SubtitleChunk],
-    speakers: Option<&Vec<crate::comm::SpeakerSegment>>,
-) -> String {
-    let mut out = String::from("[\n");
+fn format_batch(chunks: &[SubtitleChunk]) -> String {
+    let mut out = String::new();
     for (i, c) in chunks.iter().enumerate() {
-        let s = speakers
-            .and_then(|sp| {
-                sp.iter()
-                    .find(|s| (s.start_sec - c.start_sec).abs() < 0.5)
-                    .map(|s| s.speaker_id.as_str())
-            })
-            .unwrap_or("S?");
-        let escaped = c.text
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\t', "\\t")
-            .replace('\r', "\\r");
-        out.push_str(&format!(
-            "  {{\"start_sec\":{},\"end_sec\":{},\"text\":\"{}\",\"speaker_id\":\"{}\"}}",
-            c.start_sec,
-            c.end_sec,
-            escaped,
-            s
-        ));
-        if i < chunks.len() - 1 {
-            out.push(',');
+        if c.text.trim().is_empty() {
+            continue;
         }
-        out.push('\n');
+        out.push_str(&format!("[{}] {}\n", i, c.text));
     }
-    out.push(']');
     out
 }
 
@@ -333,65 +275,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fix_json_quotes_no_change() {
-        let input = r#"{"start_sec":0,"end_sec":8,"text":"hello world","speaker_id":"S1"}"#;
-        let result = fix_json_quotes(input);
-        assert_eq!(result, input);
+    fn test_parse_tagged_translation_simple() {
+        let input = "[0] Привет мир\n[1] Это тест\n";
+        let result = parse_tagged_translation(input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(&0).unwrap(), "Привет мир");
+        assert_eq!(result.get(&1).unwrap(), "Это тест");
     }
 
     #[test]
-    fn test_fix_json_quotes_unescaped_inside() {
-        let input = r#"{"start_sec":0,"end_sec":8,"text":"say "hello" world","speaker_id":"S1"}"#;
-        let expected = r#"{"start_sec":0,"end_sec":8,"text":"say \"hello\" world","speaker_id":"S1"}"#;
-        let result = fix_json_quotes(input);
-        assert_eq!(result, expected);
+    fn test_parse_tagged_translation_extra_text() {
+        let input = "Here is the translation:\n[0] Привет\n[1] Как дела?\nDone!";
+        let result = parse_tagged_translation(input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(&0).unwrap(), "Привет");
     }
 
     #[test]
-    fn test_fix_json_quotes_already_escaped() {
-        let input = r#"{"start_sec":0,"end_sec":8,"text":"say \"hello\" world","speaker_id":"S1"}"#;
-        let result = fix_json_quotes(input);
-        assert_eq!(result, input);
+    fn test_parse_tagged_translation_empty() {
+        assert!(parse_tagged_translation("").is_empty());
+        assert!(parse_tagged_translation("no tags here").is_empty());
     }
 
     #[test]
-    fn test_fix_json_quotes_with_backslash() {
-        let input = r#"{"start_sec":0,"end_sec":8,"text":"path\\to\\file","speaker_id":"S1"}"#;
-        let result = fix_json_quotes(input);
-        assert_eq!(result, input);
+    fn test_parse_tagged_translation_skipped_index() {
+        let input = "[0] Привет\n[2] Пропущен 1\n";
+        let result = parse_tagged_translation(input);
+        assert_eq!(result.len(), 2);
+        assert!(result.get(&1).is_none());
     }
 
     #[test]
-    fn test_parse_llm_json_valid() {
-        let input = r#"[{"start_sec":0.0,"end_sec":8.0,"text":"Привет мир","speaker_id":"S?"}]"#;
-        let result = parse_llm_json(input);
-        assert!(result.is_some());
-        let chunks = result.unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, "Привет мир");
-        assert!((chunks[0].start_sec - 0.0).abs() < 0.01);
-        assert!((chunks[0].end_sec - 8.0).abs() < 0.01);
+    fn test_format_batch() {
+        let chunks = vec![
+            SubtitleChunk {
+                start_sec: 0.0,
+                end_sec: 1.0,
+                text: "Hello".to_string(),
+                speaker_id: None,
+                word_timestamps: None,
+            },
+            SubtitleChunk {
+                start_sec: 1.0,
+                end_sec: 2.0,
+                text: "World".to_string(),
+                speaker_id: None,
+                word_timestamps: None,
+            },
+        ];
+        let output = format_batch(&chunks);
+        assert_eq!(output, "[0] Hello\n[1] World\n");
     }
 
     #[test]
-    fn test_parse_llm_json_with_extra_text() {
-        let input = r#"Here is the translation: [{"start_sec":0.0,"end_sec":8.0,"text":"Привет","speaker_id":"S?"}]"#;
-        let result = parse_llm_json(input);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_parse_llm_json_unescaped_quotes() {
-        let input = r#"Here: [{"start_sec":0.0,"end_sec":8.0,"text":"say "hello" world","speaker_id":"S?"}]"#;
-        let result = parse_llm_json(input);
-        assert!(result.is_some(), "Should recover from unescaped quotes");
-        assert_eq!(result.unwrap()[0].text, "say \"hello\" world");
-    }
-
-    #[test]
-    fn test_parse_llm_json_empty() {
-        assert!(parse_llm_json("").is_none());
-        assert!(parse_llm_json("no brackets here").is_none());
+    fn test_format_batch_skips_empty() {
+        let chunks = vec![
+            SubtitleChunk {
+                start_sec: 0.0,
+                end_sec: 1.0,
+                text: "".to_string(),
+                speaker_id: None,
+                word_timestamps: None,
+            },
+            SubtitleChunk {
+                start_sec: 1.0,
+                end_sec: 2.0,
+                text: "Hello".to_string(),
+                speaker_id: None,
+                word_timestamps: None,
+            },
+        ];
+        let output = format_batch(&chunks);
+        assert_eq!(output, "[0] Hello\n");
     }
 }

@@ -8,7 +8,12 @@ pub struct AppConfig {
     pub output_format: String,
     pub ffmpeg_path: Option<String>,
     pub vad_threshold_db: Option<String>,
+    pub vad_model_dir: Option<String>,
     pub sherpa_onnx_dir: Option<String>,
+    pub stt_model: Option<String>,
+    pub diarization_models_dir: Option<String>,
+    pub diarization_threshold: Option<f64>,
+    pub diarization_num_speakers: Option<i32>,
 }
 
 impl Default for AppConfig {
@@ -18,7 +23,12 @@ impl Default for AppConfig {
             output_format: "mp4".to_string(),
             ffmpeg_path: None,
             vad_threshold_db: None,
+            vad_model_dir: None,
             sherpa_onnx_dir: None,
+            stt_model: None,
+            diarization_models_dir: None,
+            diarization_threshold: None,
+            diarization_num_speakers: None,
         }
     }
 }

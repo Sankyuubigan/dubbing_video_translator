@@ -6,18 +6,32 @@ use std::process::Command;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub fn mux(ctx: PipelineContext) -> Result<PipelineContext> {
-    let chunks = match ctx.translated_chunks.as_ref() {
+    let ru_chunks = match ctx.translated_chunks.as_ref() {
         Some(c) => c,
         None => {
             log::error!("output: Нет переведённых чанков");
             anyhow::bail!("Нет переведённых чанков");
         }
     };
+    let en_chunks = match ctx.subtitle_chunks.as_ref() {
+        Some(c) => c,
+        None => {
+            log::error!("output: Нет оригинальных чанков");
+            anyhow::bail!("Нет оригинальных чанков");
+        }
+    };
 
-    let srt_path = match write_srt(chunks) {
+    let srt_ru = match write_srt(ru_chunks, "ru") {
         Ok(p) => p,
         Err(e) => {
-            log::error!("output: Ошибка записи SRT: {:#}", e);
+            log::error!("output: Ошибка записи SRT (ru): {:#}", e);
+            return Err(e);
+        }
+    };
+    let srt_en = match write_srt(en_chunks, "en") {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("output: Ошибка записи SRT (en): {:#}", e);
             return Err(e);
         }
     };
@@ -31,19 +45,11 @@ pub fn mux(ctx: PipelineContext) -> Result<PipelineContext> {
 
     let fmt = ctx.config.output_format.to_lowercase();
 
-    // Пытаемся замуксовать субтитры. Если не выходит — сохраняем отдельный .srt
-    let muxed = try_mux(input, &srt_path, &fmt, &ctx.config.ffmpeg_path);
-
-    let (output_path, _srt_output) = match muxed {
-        Ok(path) => (path, None::<String>),
+    let output_path = match try_mux(input, &srt_en, &srt_ru, &fmt, &ctx.config.ffmpeg_path) {
+        Ok(path) => path,
         Err(e) => {
-            log::warn!("output: Muxing failed ({}), сохраняем отдельный SRT", e);
-            let srt_out = generate_srt_output_path(input);
-            match std::fs::copy(&srt_path, &srt_out) {
-                Ok(_) => log::info!("output: SRT сохранён: {}", srt_out),
-                Err(e) => log::error!("output: Не удалось сохранить SRT: {}", e),
-            }
-            (srt_out, None::<String>)
+            log::error!("output: Muxing failed: {}", e);
+            return Err(e);
         }
     };
 
@@ -53,9 +59,9 @@ pub fn mux(ctx: PipelineContext) -> Result<PipelineContext> {
     })
 }
 
-fn try_mux(input: &str, srt_path: &str, fmt: &str, ffmpeg_cfg: &Option<String>) -> Result<String> {
+fn try_mux(input: &str, srt_en: &str, srt_ru: &str, fmt: &str, ffmpeg_cfg: &Option<String>) -> Result<String> {
     let output_path = generate_output_path(input, fmt);
-    log::info!("Маскинг: вшиваем субтитры в {}", output_path);
+    log::info!("Маскинг: вшиваем субтитры (en + ru) в {}", output_path);
 
     // MKV поддерживает SRT нативно, MP4/MOV требуют mov_text
     let sub_codec = match fmt {
@@ -64,43 +70,47 @@ fn try_mux(input: &str, srt_path: &str, fmt: &str, ffmpeg_cfg: &Option<String>) 
     };
 
     let ffmpeg = crate::ffmpeg::resolve(ffmpeg_cfg);
-    run_ffmpeg_mux(&ffmpeg, input, srt_path, &output_path, sub_codec)?;
+    run_ffmpeg_mux(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec)?;
     Ok(output_path)
 }
 
-fn run_ffmpeg_mux(ffmpeg: &str, input: &str, srt_path: &str, output: &str, sub_codec: &str) -> Result<()> {
-    let status = Command::new(ffmpeg)
-        .creation_flags(CREATE_NO_WINDOW)
-        .arg("-i")
-        .arg(input)
-        .arg("-sub_charenc")
-        .arg("UTF-8")
-        .arg("-i")
-        .arg(srt_path)
-        .arg("-c:v")
-        .arg("copy")
-        .arg("-c:a")
-        .arg("copy")
-        .arg("-c:s")
-        .arg(sub_codec)
-        .arg("-metadata:s:s:0")
-        .arg("language=rus")
+fn run_ffmpeg_mux(ffmpeg: &str, input: &str, srt_en: &str, srt_ru: &str, output: &str, sub_codec: &str) -> Result<()> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.creation_flags(CREATE_NO_WINDOW)
+        .arg("-i").arg(input)
+        .arg("-sub_charenc").arg("UTF-8")
+        .arg("-i").arg(srt_en)
+        .arg("-sub_charenc").arg("UTF-8")
+        .arg("-i").arg(srt_ru)
+        .arg("-map").arg("0:v")
+        .arg("-map").arg("0:a")
+        .arg("-map").arg("1")
+        .arg("-map").arg("2")
+        .arg("-c:v").arg("copy")
+        .arg("-c:a").arg("copy")
+        .arg("-c:s").arg(sub_codec)
+        .arg("-metadata:s:s:0").arg("language=eng")
+        .arg("-metadata:s:s:1").arg("language=rus")
         .arg("-y")
-        .arg(output)
-        .output()
+        .arg(output);
+
+    log::info!("output: ffmpeg command: {:?}", cmd);
+
+    let status = cmd.output()
         .map_err(|e| anyhow::anyhow!("FFmpeg не найден: {}", e))?;
 
     if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
+        log::error!("output: ffmpeg stderr:\n{}", stderr);
         anyhow::bail!("FFmpeg muxing error: {}", stderr);
     }
     log::info!("output: muxed -> {}", output);
     Ok(())
 }
 
-fn write_srt(chunks: &[SubtitleChunk]) -> Result<String> {
+fn write_srt(chunks: &[SubtitleChunk], suffix: &str) -> Result<String> {
     let srt_path = std::env::temp_dir()
-        .join("dubvidtra_subtitles.srt")
+        .join(format!("dubvidtra_subtitles_{}.srt", suffix))
         .to_string_lossy()
         .to_string();
 
@@ -150,15 +160,4 @@ fn generate_output_path(input: &str, format: &str) -> String {
         .to_string()
 }
 
-fn generate_srt_output_path(input: &str) -> String {
-    let input_path = std::path::Path::new(input);
-    let parent = input_path.parent().unwrap_or(std::path::Path::new("."));
-    let stem = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    parent
-        .join(format!("{}_subs.srt", stem))
-        .to_string_lossy()
-        .to_string()
-}
+

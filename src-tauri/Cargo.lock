@@ -52,11 +52,13 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bzip2 0.5.2",
  "dirs",
  "encoding_rs",
  "hound",
  "llama-cpp-2",
  "log",
+ "regex",
  "serde",
  "serde_json",
  "sherpa-onnx",
@@ -249,6 +251,15 @@ checksum = "bdb116a6ef3f6c3698828873ad02c3014b3c85cadb88496095628e3ef1e347f8"
 dependencies = [
  "bzip2-sys",
  "libc",
+]
+
+[[package]]
+name = "bzip2"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
+dependencies = [
+ "bzip2-sys",
 ]
 
 [[package]]
@@ -3068,7 +3079,7 @@ version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f3fe4987367b162336027b5d1ffca6dcd627bee6a324e46f80e82dfcb4365b"
 dependencies = [
- "bzip2",
+ "bzip2 0.4.4",
  "tar",
  "ureq",
 ]

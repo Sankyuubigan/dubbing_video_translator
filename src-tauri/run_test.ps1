@@ -67,12 +67,16 @@ if (Test-Path $ConfigPath) {
 }
 
 Write-Host ""
+Write-Host "=== РЕКОМЕНДУЕМЫЙ СПОСОБ (без Tauri окна): ===" -ForegroundColor Green
+Write-Host "  cd src-tauri && cargo run --bin test-pipeline --release -- --video ""path\to\video.mp4""" -ForegroundColor White
+Write-Host ""
 Write-Host "=== To run the full pipeline in GUI mode: ===" -ForegroundColor Cyan
 Write-Host "  cd src-tauri && cargo tauri dev" -ForegroundColor White
 Write-Host ""
-Write-Host "=== To run with auto-test (pipeline runs on app start): ===" -ForegroundColor Cyan
+Write-Host "=== To run with auto-test (pipeline runs on app start, ОТКРЫВАЕТ ОКНО): ===" -ForegroundColor Yellow
 Write-Host '  $env:DUBVID_TEST_VIDEO = "path\to\video.mp4"' -ForegroundColor White
 Write-Host "  cd src-tauri && cargo tauri dev" -ForegroundColor White
+Write-Host "  ВНИМАНИЕ: открывает Tauri окно с ERR_CONNECTION_REFUSED, не закрывать пока не завершится"
 Write-Host ""
 Write-Host "=== Run Rust unit tests: ===" -ForegroundColor Cyan
 Write-Host "  cd src-tauri && cargo test" -ForegroundColor White

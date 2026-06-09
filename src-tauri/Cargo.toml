@@ -12,6 +12,14 @@ rust-version = "1.78"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[[bin]]
+name = "test-pipeline"
+path = "src/bin/test_pipeline.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 
@@ -33,6 +41,8 @@ encoding_rs = "0.8"
 
 llama-cpp-2 = { version = "0.1.146", features = ["cuda"] }
 sherpa-onnx = { version = "1.13.2", default-features = false, features = ["shared"] }
+bzip2 = "0.5"
+regex = "1.10"
 
 [features]
 default = []
