@@ -4,33 +4,44 @@ from llama_cpp import Llama
 from utils.segment_utils import segments_to_srt_string
 
 _llm_instance = None
+_llm_instance_path = None
 
-def get_llm(models_dir):
-    global _llm_instance
-    if _llm_instance: return _llm_instance
+def get_llm(models_dir, gguf_path=None):
+    global _llm_instance, _llm_instance_path
     
-    # Новое имя файла Qwen 3.5 4B
-    gguf_path = os.path.join(models_dir, "llm_translator", "Qwen3.5-4B-Q4_K_M.gguf")
+    if gguf_path:
+        if _llm_instance is not None and _llm_instance_path == gguf_path:
+            return _llm_instance
+        _llm_instance = None
     
-    if not os.path.exists(gguf_path):
-        raise FileNotFoundError(f"LLM model not found at {gguf_path}")
+    if _llm_instance is not None:
+        return _llm_instance
+    
+    if gguf_path and os.path.exists(gguf_path):
+        final_path = gguf_path
+    else:
+        final_path = os.path.join(models_dir, "llm_translator", "Qwen3.5-4B-Q4_K_M.gguf")
+    
+    if not os.path.exists(final_path):
+        raise FileNotFoundError(f"LLM model not found at {final_path}")
         
-    print("Loading Llama.cpp (Qwen 3.5 4B 4-bit)...")
+    print(f"Loading Llama.cpp from {os.path.basename(final_path)}...")
     _llm_instance = Llama(
-        model_path=gguf_path,
+        model_path=final_path,
         n_ctx=8192,
-        n_gpu_layers=-1, # -1 означает выгрузку всех слоев на видеокарту для макс. скорости
+        n_gpu_layers=-1,
         verbose=False
     )
+    _llm_instance_path = gguf_path
     return _llm_instance
 
-def translate_segments(segments, models_dir):
+def translate_segments(segments, models_dir, gguf_path=None):
     """
     Переводит сегменты с учетом контекста, конвертируя их в SRT и пропуская через LLM.
     """
     if not segments: return segments, True
     
-    llm = get_llm(models_dir)
+    llm = get_llm(models_dir, gguf_path)
     
     english_srt = segments_to_srt_string(segments)
     

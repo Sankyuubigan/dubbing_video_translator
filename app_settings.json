@@ -1,3 +1,4 @@
 {
-    "work_dir": "d:\\Projects\\dubbing_video_translator\\work_dir"
+    "work_dir": "d:\\Projects\\dubbing_video_translator\\work_dir",
+    "llm_gguf_path": "D:/nn/models/translation/Hy-MT2-7B.i1-Q4_K_M.gguf"
 }

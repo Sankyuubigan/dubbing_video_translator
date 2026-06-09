@@ -76,6 +76,24 @@ def mix_and_replace_audio(video_path, original_audio, dubbed_audio, output_path,
         print(f"Mix error: {e}")
         return False
 
+def embed_soft_subtitles(video_path, srt_orig, srt_translated, output_path):
+    try:
+        cmd = [
+            'ffmpeg', '-i', video_path,
+            '-i', srt_orig,
+            '-i', srt_translated,
+            '-map', '0:v', '-map', '0:a', '-map', '1', '-map', '2',
+            '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'mov_text',
+            '-metadata:s:s:0', 'language=eng',
+            '-metadata:s:s:1', 'language=rus',
+            '-y', output_path
+        ]
+        subprocess.run(cmd, capture_output=True, check=True)
+        return True
+    except Exception as e:
+        print(f"Embed subtitles error: {e}")
+        return False
+
 def concatenate_video_chunks(chunks, output_path, temp_dir):
     # (Код из предыдущего ответа)
     list_path = os.path.join(temp_dir, "concat.txt")

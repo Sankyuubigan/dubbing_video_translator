@@ -1,4 +1,5 @@
 import os
+os.environ["HF_HUB_OFFLINE"] = "1"
 import tempfile
 import shutil
 import tkinter as tk
@@ -30,15 +31,25 @@ class App:
         p.pack(fill=tk.BOTH, expand=True)
         
         ttk.Label(p, text="Video File:").pack(anchor=tk.W)
-        self.vid_var = tk.StringVar()
         hbox = ttk.Frame(p)
         hbox.pack(fill=tk.X)
+        self.vid_var = tk.StringVar()
         ttk.Entry(hbox, textvariable=self.vid_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(hbox, text="...", command=lambda: self.vid_var.set(filedialog.askopenfilename())).pack(side=tk.LEFT)
         
-        ttk.Button(p, text="Start Processing", command=self.on_start).pack(pady=10)
+        ttk.Label(p, text="LLM Model (GGUF):").pack(anchor=tk.W, pady=(10,0))
+        hbox2 = ttk.Frame(p)
+        hbox2.pack(fill=tk.X)
+        self.llm_path_var = tk.StringVar(value=config_manager.get_setting("llm_gguf_path", ""))
+        ttk.Entry(hbox2, textvariable=self.llm_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(hbox2, text="...", command=self.browse_llm).pack(side=tk.LEFT)
         
-        self.log = scrolledtext.ScrolledText(p, height=20)
+        btn_frame = ttk.Frame(p)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Start Processing", command=self.on_start).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Добавить субтитры", command=self.on_subtitles).pack(side=tk.LEFT, padx=5)
+        
+        self.log = scrolledtext.ScrolledText(p, height=18)
         self.log.pack(fill=tk.BOTH, expand=True)
         
         self.context_menu = tk.Menu(self.root, tearoff=0)
@@ -80,8 +91,25 @@ class App:
         except Exception as e:
             self.log_msg(f"Error checking models: {e}")
 
+    def browse_llm(self):
+        path = filedialog.askopenfilename(filetypes=[("GGUF files", "*.gguf"), ("All files", "*.*")])
+        if path:
+            self.llm_path_var.set(path)
+            config_manager.save_setting("llm_gguf_path", path)
+
     def on_start(self):
         threading.Thread(target=self.process, daemon=True).start()
+
+    def on_subtitles(self):
+        threading.Thread(target=self.process_subtitles, daemon=True).start()
+
+    def _transcribe_and_translate(self, vid, temp_dir):
+        wav_path = os.path.join(temp_dir, "source_16k.wav")
+        video_processor.extract_audio(vid, wav_path, 16000)
+        segments = transcriber.transcribe_and_diarize(wav_path, self.models_dir)
+        gguf_path = self.llm_path_var.get().strip() or None
+        segments, _ = translator.translate_segments(segments, self.models_dir, gguf_path)
+        return segments
 
     def process(self):
         vid = self.vid_var.get()
@@ -92,15 +120,10 @@ class App:
         temp_dir = tempfile.mkdtemp()
         try:
             self.log_msg("1. Extracting audio...")
-            wav_path = os.path.join(temp_dir, "source_16k.wav")
-            video_processor.extract_audio(vid, wav_path, 16000)
-            
             self.log_msg("2. Transcribing & Diarizing (WhisperX + Pyannote)...")
-            segments = transcriber.transcribe_and_diarize(wav_path, self.models_dir)
-            self.log_msg(f"   Found {len(segments)} segments with speaker tags.")
-            
             self.log_msg("3. Contextual Translating (Llama.cpp Qwen)...")
-            segments, _ = translator.translate_segments(segments, self.models_dir)
+            segments = self._transcribe_and_translate(vid, temp_dir)
+            self.log_msg(f"   Found {len(segments)} segments with speaker tags.")
             
             self.log_msg("4. Synthesizing (VITS ONNX)...")
             dub_wav = voice_cloner.synthesize_segments(segments, self.models_dir, temp_dir)
@@ -112,6 +135,43 @@ class App:
             video_processor.extract_audio(vid, orig_bg, 44100)
             
             video_processor.mix_and_replace_audio(vid, orig_bg, dub_wav, out_vid)
+            
+            self.log_msg(f"Done! Saved to {out_vid}")
+            
+        except Exception as e:
+            self.log_msg(f"Error: {e}")
+            traceback.print_exc()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def process_subtitles(self):
+        vid = self.vid_var.get()
+        if not os.path.exists(vid):
+            self.log_msg("Error: Video not found")
+            return
+            
+        temp_dir = tempfile.mkdtemp()
+        try:
+            self.log_msg("1. Extracting audio...")
+            self.log_msg("2. Transcribing & Diarizing (WhisperX + Pyannote)...")
+            self.log_msg("3. Contextual Translating (Llama.cpp Qwen)...")
+            segments = self._transcribe_and_translate(vid, temp_dir)
+            self.log_msg(f"   Found {len(segments)} segments with speaker tags.")
+            
+            self.log_msg("4. Generating SRT subtitles...")
+            from utils.segment_utils import segments_to_srt_string
+            
+            srt_en_path = os.path.join(temp_dir, "original.srt")
+            srt_ru_path = os.path.join(temp_dir, "russian.srt")
+            
+            with open(srt_en_path, 'w', encoding='utf-8') as f:
+                f.write(segments_to_srt_string(segments))
+            with open(srt_ru_path, 'w', encoding='utf-8') as f:
+                f.write(segments_to_srt_string(segments, use_translated_text_field="translated_text"))
+            
+            self.log_msg("5. Embedding soft subtitles into video...")
+            out_vid = os.path.join(self.work_dir, "result_subbed.mp4")
+            video_processor.embed_soft_subtitles(vid, srt_en_path, srt_ru_path, out_vid)
             
             self.log_msg(f"Done! Saved to {out_vid}")
             

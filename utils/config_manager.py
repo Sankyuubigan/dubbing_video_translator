@@ -27,6 +27,26 @@ MODELS_URLS = {
     }
 }
 
+def get_config_path():
+    if getattr(sys, 'frozen', False): return os.path.join(os.path.dirname(sys.executable), CONFIG_FILE_NAME)
+    else: return os.path.join(os.getcwd(), CONFIG_FILE_NAME)
+
+def get_setting(key, default=None):
+    cfg_path = get_config_path()
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, 'r') as f: return json.load(f).get(key, default)
+        except: pass
+    return default
+
+def save_setting(key, value):
+    cfg_path = get_config_path()
+    try:
+        with open(cfg_path, 'r') as f: cfg = json.load(f)
+    except: cfg = {}
+    cfg[key] = value
+    with open(cfg_path, 'w') as f: json.dump(cfg, f, indent=4)
+
 def get_work_dir_from_config():
     if getattr(sys, 'frozen', False): base = os.path.dirname(sys.executable)
     else: base = os.getcwd()
