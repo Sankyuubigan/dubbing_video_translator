@@ -209,40 +209,9 @@ fn try_download_bitsadmin(url: &str, path: &Path) -> Result<()> {
 }
 
 fn extract_tar_bz2(archive: &Path, dest: &Path) -> Result<()> {
-    // Способ 1: Rust bzip2 декомпрессия + Windows tar
-    let result = try_extract_rust_bzip2(archive, dest);
-    if result.is_ok() {
-        return Ok(());
-    }
-    let err1 = result.unwrap_err();
-    log::warn!("Diarization: bzip2 extraction failed: {}", err1);
-
-    // Способ 2: 7-Zip (часто установлен на Windows)
-    let result = try_extract_7z(archive, dest);
-    if result.is_ok() {
-        return Ok(());
-    }
-    let err2 = result.unwrap_err();
-    log::warn!("Diarization: 7z extraction failed: {}", err2);
-
-    anyhow::bail!(
-        "Не удалось распаковать {} в {}.\n\
-         bzip2: {}\n\
-         7z: {}\n\n\
-         Скачайте архив вручную и распакуйте 7-Zip или WinRAR в {}",
-        archive.display(),
-        dest.display(),
-        err1,
-        err2,
-        dest.display()
-    );
-}
-
-fn try_extract_rust_bzip2(archive: &Path, dest: &Path) -> Result<()> {
     use std::fs::File;
     use std::io::Read;
 
-    // Декомпрессия bz2 -> tar (в память)
     let file = File::open(archive)
         .context("Ошибка открытия bz2 архива")?;
     let mut decoder = bzip2::read::BzDecoder::new(file);
@@ -252,47 +221,9 @@ fn try_extract_rust_bzip2(archive: &Path, dest: &Path) -> Result<()> {
         .context("Ошибка декомпрессии bz2")?;
     drop(decoder);
 
-    // Сохраняем tar во временный файл рядом с архивом
-    let tar_path = archive.with_extension("tar");
-    std::fs::write(&tar_path, &tar_bytes)
-        .context("Ошибка записи временного tar-файла")?;
-
-    // Извлекаем tar через Windows tar
-    let output = Command::new("tar")
-        .arg("-xf")
-        .arg(tar_path.to_string_lossy().to_string())
-        .arg("-C")
-        .arg(dest.to_string_lossy().to_string())
-        .output()
-        .context("Ошибка запуска tar для распаковки")?;
-
-    std::fs::remove_file(&tar_path).ok();
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("tar: {}", err.trim());
-    }
-    Ok(())
-}
-
-fn try_extract_7z(archive: &Path, dest: &Path) -> Result<()> {
-    let check = Command::new("where").arg("7z").output();
-    match check {
-        Ok(out) if out.status.success() => {}
-        _ => anyhow::bail!("7z не найден"),
-    }
-
-    let output = Command::new("7z")
-        .args(&["x", "-y", "-o", &dest.to_string_lossy()])
-        .arg(archive.to_string_lossy().to_string())
-        .output()
-        .context("Ошибка запуска 7z")?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("7z: {}", err.trim());
-    }
-    Ok(())
+    let mut tar_archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+    tar_archive.unpack(dest)
+        .context("Ошибка распаковки tar архива")
 }
 
 fn load_audio(path: &str) -> Result<Vec<f32>> {

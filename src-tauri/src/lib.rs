@@ -229,11 +229,13 @@ fn process_video(
 
     let handle = app_handle.clone();
     std::thread::spawn(move || {
-        let ctx = PipelineContext::new(cfg);
-        let result = pipeline::run(ctx);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let ctx = PipelineContext::new(cfg);
+            pipeline::run(ctx)
+        }));
 
         match result {
-            Ok(result) => {
+            Ok(Ok(result)) => {
                 let path = result.output_path.unwrap_or_default();
                 log::info!("process_video: готово, output={}", path);
                 handle
@@ -248,7 +250,7 @@ fn process_video(
                     )
                     .ok();
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let err_msg = format!("{:#}", e);
                 log::error!("process_video: {}", err_msg);
                 handle
@@ -259,6 +261,27 @@ fn process_video(
                             percent: 0.0,
                             result_path: None,
                             error_message: Some(err_msg),
+                        },
+                    )
+                    .ok();
+            }
+            Err(panic) => {
+                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    format!("Внутренняя ошибка: {}", s)
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    format!("Внутренняя ошибка: {}", s)
+                } else {
+                    "Внутренняя ошибка: паника в pipeline".to_string()
+                };
+                log::error!("process_video: PANIC: {}", msg);
+                handle
+                    .emit(
+                        "pipeline-progress",
+                        ProgressUpdate {
+                            stage: "error".to_string(),
+                            percent: 0.0,
+                            result_path: None,
+                            error_message: Some(msg),
                         },
                     )
                     .ok();

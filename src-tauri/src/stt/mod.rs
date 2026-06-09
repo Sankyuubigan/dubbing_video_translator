@@ -350,8 +350,6 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         let stream = recognizer.create_stream();
 
         if stt_model == "qwen3-asr" {
-            // Пытаемся форсировать английский язык для Qwen3-ASR
-            // (работает в sherpa-onnx >= 1.13.2 с поддержкой per-stream language)
             stream.set_option("language", "English");
         }
 
@@ -360,9 +358,17 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         segment_info.push((*idx, seg.start_sec, seg.end_sec, speaker_id.clone()));
     }
 
+    // Декодируем пачками, а не всё сразу — иначе GPU OOM на длинных видео
+    const BATCH_SIZE: usize = 8;
     if !streams.is_empty() {
-        let stream_refs: Vec<&sherpa_onnx::OfflineStream> = streams.iter().collect();
-        recognizer.decode_multiple_streams(&stream_refs);
+        let total = streams.len();
+        let n_batches = (total + BATCH_SIZE - 1) / BATCH_SIZE;
+        for (batch_idx, batch) in streams.chunks(BATCH_SIZE).enumerate() {
+            log::info!("STT: декодируем пачку {}/{} ({} сегментов)",
+                batch_idx + 1, n_batches, batch.len());
+            let stream_refs: Vec<&sherpa_onnx::OfflineStream> = batch.iter().collect();
+            recognizer.decode_multiple_streams(&stream_refs);
+        }
     }
 
     let mut subtitle_chunks: Vec<SubtitleChunk> = Vec::new();

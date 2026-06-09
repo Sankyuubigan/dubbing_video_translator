@@ -100,8 +100,8 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         };
 
         let prompt = format!(
-            "Translate the following English text to Russian line by line. \
-             Keep the exact numerical tags. Output ONLY the translated text with tags.\n\n\
+            "Translate to Russian. Keep the tags [0], [1], etc. Do NOT output JSON. Output ONLY:\n\
+             [0] translation\n[1] translation\n\n\
              Input:\n{}\n\n\
              Output:",
             batch_text
@@ -189,9 +189,16 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         };
 
         let parsed = parse_tagged_translation(&output);
-        if parsed.is_empty() {
-            log::warn!("Перевод: LLM не вернула тегированный вывод ({} bytes). Вывод LLM:\n{}",
-                output.len(), &output);
+        let has_repeats = detect_repeated_translations(&parsed, 3);
+        if parsed.is_empty() || has_repeats {
+            if has_repeats {
+                log::warn!("Перевод: LLM зациклилась — повторяющиеся переводы ({} записей, {} уникальных)",
+                    parsed.len(),
+                    parsed.values().collect::<std::collections::HashSet<_>>().len());
+            } else {
+                log::warn!("Перевод: LLM не вернула тегированный вывод ({} bytes). Вывод LLM:\n{}",
+                    output.len(), &output);
+            }
             log::warn!("Перевод: используем оригинал");
             for chunk in batch {
                 if chunk.text.trim().is_empty() {
@@ -257,6 +264,25 @@ fn decode_tokens(model: &LlamaModel, tokens: &[LlamaToken]) -> String {
     }
 
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Детектит зацикливание LLM: если больше `max_repeat` переводов совпадают — галлюцинация.
+fn detect_repeated_translations(parsed: &std::collections::HashMap<usize, String>, max_repeat: usize) -> bool {
+    if parsed.len() < max_repeat {
+        return false;
+    }
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for text in parsed.values() {
+        let entry = text.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        *counts.entry(entry).or_insert(0) += 1;
+        if counts[entry] >= max_repeat {
+            return true;
+        }
+    }
+    false
 }
 
 fn format_batch(chunks: &[SubtitleChunk]) -> String {
