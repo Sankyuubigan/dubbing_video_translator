@@ -1,20 +1,73 @@
-# Pro Video Dubbing Tool (WhisperX + Llama + Pyannote)
+# React + TypeScript + Vite
 
-Этот инструмент предназначен для автоматического профессионального дубляжа видео на другой язык с сохранением таймингов и разделением по спикерам.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Что изменилось (Архитектура 2026):
-1. **WhisperX:** Используется для сверхточного распознавания английского текста и выравнивания таймингов по словам.
-2. **Pyannote Audio (Offline):** Локальная диаризация (разделение спикеров) без необходимости использования API-токенов HuggingFace.
-3. **Llama.cpp (LLM):** Перевод текста осуществляется с помощью языковой модели (Qwen 2.5), что позволяет переводить с учетом контекста всего диалога, а не отдельными фразами.
-4. **Sherpa ONNX:** Оставлен для быстрого локального синтеза речи (TTS) с голосом Denis.
+Currently, two official plugins are available:
 
-## Требования к установке (ВАЖНО!)
-Для работы модуля `pyannote` вам необходимо **вручную скачать модели** и положить их в папку:
-`work_dir/models_onnx/pyannote/`
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-Необходимые файлы:
-1. `segmentation.bin` (pytorch_model.bin из pyannote/segmentation-3.0)
-2. `wespeaker.bin` (pytorch_model.bin из pyannote/wespeaker-voxceleb-resnet34-LM)
-3. `config.yaml` (создать текстовый файл с настройками, указывающими на эти файлы).
+## React Compiler
 
-Языковая модель (Qwen) скачается автоматически при первом запуске.
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
+
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
+
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
