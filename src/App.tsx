@@ -362,6 +362,12 @@ export default function App() {
                   style={{ width: `${progress}%` }}
                 />
               </div>
+              <button
+                className="btn-cancel"
+                onClick={() => invoke("cancel_pipeline")}
+              >
+                Отмена
+              </button>
             </div>
           )}
 

@@ -44,13 +44,25 @@ pub fn get_llama_backend() -> Result<&'static LlamaBackend, String> {
     }
 }
 
-// ---- Pipeline busy flag (prevent double run) ----
+// ---- Pipeline busy flag (prevent double run) & cancel ----
 
 static PIPELINE_BUSY: AtomicBool = AtomicBool::new(false);
+static PIPELINE_CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 fn is_pipeline_busy() -> bool {
     PIPELINE_BUSY.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn cancel_pipeline() -> bool {
+    let was_set = PIPELINE_CANCEL.swap(true, Ordering::SeqCst);
+    log::info!("Cancel: пользователь запросил отмену");
+    !was_set // true если флаг был установлен сейчас
+}
+
+pub fn is_cancelled() -> bool {
+    PIPELINE_CANCEL.load(Ordering::SeqCst)
 }
 
 struct PipelineGuard;
@@ -68,6 +80,7 @@ impl PipelineGuard {
 impl Drop for PipelineGuard {
     fn drop(&mut self) {
         PIPELINE_BUSY.store(false, Ordering::SeqCst);
+        PIPELINE_CANCEL.store(false, Ordering::SeqCst);
     }
 }
 
@@ -115,6 +128,16 @@ fn log_paths() -> Vec<std::path::PathBuf> {
     }
 
     paths
+}
+
+/// Очищает все last_logs.log при старте
+pub fn truncate_logs() {
+    for path in log_paths() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, "");
+    }
 }
 
 fn log_to_file(msg: &str) {
@@ -345,6 +368,7 @@ pub fn setup_logger() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    truncate_logs();
     setup_logger();
 
     let app_cfg = config::load();
@@ -438,6 +462,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             is_pipeline_busy,
+            cancel_pipeline,
             process_video,
             get_config,
             save_config,

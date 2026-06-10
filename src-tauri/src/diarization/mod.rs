@@ -753,7 +753,7 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
     speaker_segments = postprocess_segments(speaker_segments);
 
     for seg in &speaker_segments {
-        log::info!(
+        log::debug!(
             "Diarization: {:.1}s–{:.1}s -> {}",
             seg.start_sec,
             seg.end_sec,

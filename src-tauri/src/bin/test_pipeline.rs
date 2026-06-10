@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 fn main() {
+    app_lib::truncate_logs();
     app_lib::setup_logger();
 
     let args: Vec<String> = std::env::args().collect();

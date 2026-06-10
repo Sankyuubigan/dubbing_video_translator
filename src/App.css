@@ -132,6 +132,7 @@
   background: var(--bg);
   border-radius: 3px;
   overflow: hidden;
+  margin-bottom: 12px;
 }
 
 .progress-fill {
@@ -139,6 +140,22 @@
   background: var(--accent);
   border-radius: 3px;
   transition: width 0.3s ease;
+}
+
+.btn-cancel {
+  background: var(--red);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 20px;
+  font: 600 14px var(--font);
+  cursor: pointer;
+  width: 100%;
+  transition: opacity 0.2s;
+}
+
+.btn-cancel:hover {
+  opacity: 0.85;
 }
 
 .success {

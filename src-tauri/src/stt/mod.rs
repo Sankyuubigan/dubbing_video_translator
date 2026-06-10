@@ -91,7 +91,7 @@ fn split_vad_by_speakers<'a>(
                 let overlap_start = overlapping[i].start_sec;
                 let overlap_end = overlapping[i - 1].end_sec.min(overlapping[i].end_sec);
                 let midpoint = (overlap_start + overlap_end) / 2.0;
-                log::info!(
+                log::debug!(
                     "STT: разрешаем перекрытие сегментов спикеров: {:.1}s–{:.1}s [{}] и {:.1}s–{:.1}s [{}], делим по {:.1}s",
                     overlapping[i - 1].start_sec, overlapping[i - 1].end_sec, overlapping[i - 1].speaker_id,
                     overlapping[i].start_sec, overlapping[i].end_sec, overlapping[i].speaker_id,
@@ -176,7 +176,7 @@ fn split_vad_by_speakers<'a>(
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             });
         if let Some(ns) = nearest {
-            log::info!(
+            log::debug!(
                 "STT: назначаем спикера {} для gap-сегмента {:.1}s–{:.1}s",
                 ns.speaker_id, item.1.start_sec, item.1.end_sec
             );
@@ -329,7 +329,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     let mut segment_info: Vec<(usize, f64, f64, Option<String>)> = Vec::new();
 
     for (idx, seg, speaker_id) in &sub_segments {
-        log::info!("STT: сегмент {}: {:.1}с–{:.1}с{}",
+        log::debug!("STT: сегмент {}: {:.1}с–{:.1}с{}",
             idx, seg.start_sec, seg.end_sec,
             speaker_id.as_ref().map_or(String::new(), |s| format!(" [{}]", s)));
 
@@ -363,9 +363,13 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     if !streams.is_empty() {
         let total = streams.len();
         let n_batches = (total + BATCH_SIZE - 1) / BATCH_SIZE;
+        let log_step = (n_batches / 10).max(1);
         for (batch_idx, batch) in streams.chunks(BATCH_SIZE).enumerate() {
-            log::info!("STT: декодируем пачку {}/{} ({} сегментов)",
-                batch_idx + 1, n_batches, batch.len());
+            if batch_idx == 0 || batch_idx == n_batches - 1 || batch_idx % log_step == 0 {
+                let pct = (batch_idx + 1) * 100 / n_batches;
+                log::info!("STT: декодировано {}/{} пачек ({}%)",
+                    batch_idx + 1, n_batches, pct);
+            }
             let stream_refs: Vec<&sherpa_onnx::OfflineStream> = batch.iter().collect();
             recognizer.decode_multiple_streams(&stream_refs);
         }
@@ -375,7 +379,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     for (offset, (orig_idx, start_sec, end_sec, speaker_id)) in segment_info.iter().enumerate() {
         let text = match streams[offset].get_result() {
             Some(r) => {
-                log::info!("STT: сырой результат сегмента {}: {:?}", orig_idx, r.text);
+                log::debug!("STT: сырой результат сегмента {}: {:?}", orig_idx, r.text);
                 r.text
             }
             None => {
@@ -396,7 +400,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
             continue;
         }
 
-        log::info!("STT: сегмент {} распознан: {}", orig_idx, clean);
+        log::debug!("STT: сегмент {} распознан: {}", orig_idx, clean);
         subtitle_chunks.push(SubtitleChunk {
             start_sec: *start_sec,
             end_sec: *end_sec,
@@ -429,7 +433,7 @@ fn merge_empty_segment(chunks: &mut Vec<SubtitleChunk>, start_sec: f64, end_sec:
     if let Some(last) = chunks.last_mut() {
         let gap = start_sec - last.end_sec;
         if gap <= MERGE_MAX_GAP {
-            log::info!(
+            log::debug!(
                 "STT: мержим пустой сегмент {} ({:.1}s–{:.1}s) с предыдущим чанком (расширяем до {:.1}s)",
                 idx, start_sec, end_sec, end_sec
             );
@@ -445,7 +449,7 @@ fn merge_empty_segment(chunks: &mut Vec<SubtitleChunk>, start_sec: f64, end_sec:
         speaker_id: None,
         word_timestamps: None,
     });
-    log::info!(
+    log::debug!(
         "STT: пустой сегмент {} ({:.1}s–{:.1}s) добавлен как плейсхолдер для заполнения",
         idx, start_sec, end_sec
     );
@@ -460,14 +464,14 @@ fn fill_placeholder_gaps(chunks: &mut Vec<SubtitleChunk>) {
         }
         if i > 0 {
             chunks[i - 1].end_sec = chunks[i].end_sec;
-            log::info!("STT: заполняем плейсхолдер {:.1}s–{:.1}s — расширяем предыдущий чанк",
+            log::debug!("STT: заполняем плейсхолдер {:.1}s–{:.1}s — расширяем предыдущий чанк",
                 chunks[i].start_sec, chunks[i].end_sec);
         }
         chunks.remove(i);
     }
 }
 
-const MAX_TEXT_CHARS: usize = 65;
+const MAX_TEXT_CHARS: usize = 120;
 
 /// Разбивает длинные субтитры на несколько более коротких по границам предложений.
 /// Время распределяется пропорционально длине текста.
@@ -489,7 +493,7 @@ fn split_long_chunks(chunks: Vec<SubtitleChunk>) -> Vec<SubtitleChunk> {
             let part_duration = (part_chars / total_chars) * total_duration;
             let current_end = (current_start + part_duration).min(chunk.end_sec);
 
-            log::info!(
+            log::debug!(
                 "STT: разбиваем длинный чанк ({:.1}s–{:.1}s, {} символов) на: {:.1}s–{:.1}s [{}]",
                 chunk.start_sec, chunk.end_sec, chunk.text.len(),
                 current_start, current_end, part,

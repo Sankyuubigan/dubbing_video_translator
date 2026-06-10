@@ -217,9 +217,11 @@ pub fn detect(ctx: PipelineContext) -> Result<PipelineContext> {
 
     let final_segments = merge_segments(raw_segments, MIN_SEGMENT_SEC);
 
-    log::info!("VAD: найдено {} речевых сегментов (Silero VAD)", final_segments.len());
+    log::info!("VAD: найдено {} речевых сегментов, общая длительность речи: {:.1}s",
+        final_segments.len(),
+        final_segments.iter().map(|s| s.end_sec - s.start_sec).sum::<f64>());
     for (i, s) in final_segments.iter().enumerate() {
-        log::info!("VAD: сегмент {}: {:.1}s–{:.1}s ({:.1}s)",
+        log::debug!("VAD: сегмент {}: {:.1}s–{:.1}s ({:.1}s)",
             i, s.start_sec, s.end_sec, s.end_sec - s.start_sec);
     }
 

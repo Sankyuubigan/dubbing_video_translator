@@ -19,6 +19,9 @@ fn emit(stage: &str, percent: f32) {
 
 macro_rules! timed_stage {
     ($name:expr, $percent:expr, $ctx:expr, $stage:expr) => {{
+        if crate::is_cancelled() {
+            anyhow::bail!("Pipeline отменён пользователем на этапе {}", $name);
+        }
         emit($name, $percent);
         let t = Instant::now();
         let result = $stage($ctx);
@@ -36,7 +39,6 @@ pub fn run(ctx: PipelineContext) -> Result<PipelineContext> {
     let ctx = timed_stage!("vad", 15.0, ctx, crate::vad::detect)
         .map_err(|e| { log::error!("[pipeline] vad: {:#}", e); e })?;
 
-    // Диаризация ДО STT — чтобы STT резал аудио по границам спикеров
     let ctx = timed_stage!("diarize", 30.0, ctx, crate::diarization::diarize)
         .map_err(|e| { log::error!("[pipeline] diarization: {:#}", e); e })?;
 
