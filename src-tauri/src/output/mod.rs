@@ -45,7 +45,14 @@ pub fn mux(ctx: PipelineContext) -> Result<PipelineContext> {
 
     let fmt = ctx.config.output_format.to_lowercase();
 
-    let output_path = match try_mux(input, &srt_en, &srt_ru, &fmt, &ctx.config.ffmpeg_path) {
+    let output_path = match try_mux(
+        input,
+        &srt_en,
+        &srt_ru,
+        &fmt,
+        &ctx.config.ffmpeg_path,
+        ctx.dubbed_audio_path.as_deref(),
+    ) {
         Ok(path) => path,
         Err(e) => {
             log::error!("output: Muxing failed: {}", e);
@@ -59,18 +66,28 @@ pub fn mux(ctx: PipelineContext) -> Result<PipelineContext> {
     })
 }
 
-fn try_mux(input: &str, srt_en: &str, srt_ru: &str, fmt: &str, ffmpeg_cfg: &Option<String>) -> Result<String> {
+fn try_mux(
+    input: &str,
+    srt_en: &str,
+    srt_ru: &str,
+    fmt: &str,
+    ffmpeg_cfg: &Option<String>,
+    dubbed_audio: Option<&str>,
+) -> Result<String> {
     let output_path = generate_output_path(input, fmt);
     log::info!("Маскинг: вшиваем субтитры (en + ru) в {}", output_path);
 
-    // MKV поддерживает SRT нативно, MP4/MOV требуют mov_text
     let sub_codec = match fmt {
         "mkv" => "srt",
         _ => "mov_text",
     };
 
     let ffmpeg = crate::ffmpeg::resolve(ffmpeg_cfg);
-    run_ffmpeg_mux(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec)?;
+    if let Some(dub_path) = dubbed_audio {
+        run_ffmpeg_mux_with_dub(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec, dub_path)?;
+    } else {
+        run_ffmpeg_mux(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec)?;
+    }
     Ok(output_path)
 }
 
@@ -105,6 +122,51 @@ fn run_ffmpeg_mux(ffmpeg: &str, input: &str, srt_en: &str, srt_ru: &str, output:
         anyhow::bail!("FFmpeg muxing error: {}", stderr);
     }
     log::info!("output: muxed -> {}", output);
+    Ok(())
+}
+
+fn run_ffmpeg_mux_with_dub(
+    ffmpeg: &str,
+    input: &str,
+    srt_en: &str,
+    srt_ru: &str,
+    output: &str,
+    sub_codec: &str,
+    dubbed_audio: &str,
+) -> Result<()> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.creation_flags(CREATE_NO_WINDOW)
+        .arg("-i").arg(input)
+        .arg("-i").arg(dubbed_audio)
+        .arg("-sub_charenc").arg("UTF-8")
+        .arg("-i").arg(srt_en)
+        .arg("-sub_charenc").arg("UTF-8")
+        .arg("-i").arg(srt_ru)
+        .arg("-filter_complex")
+        .arg("[0:a]volume=0.15[orig];[orig][1:a]amix=inputs=2:duration=first:dropout_transition=2[aout]")
+        .arg("-map").arg("0:v")
+        .arg("-map").arg("[aout]")
+        .arg("-map").arg("2")
+        .arg("-map").arg("3")
+        .arg("-c:v").arg("copy")
+        .arg("-c:a").arg("aac")
+        .arg("-c:s").arg(sub_codec)
+        .arg("-metadata:s:s:0").arg("language=eng")
+        .arg("-metadata:s:s:1").arg("language=rus")
+        .arg("-y")
+        .arg(output);
+
+    log::info!("output: ffmpeg command with dub: {:?}", cmd);
+
+    let status = cmd.output()
+        .map_err(|e| anyhow::anyhow!("FFmpeg не найден: {}", e))?;
+
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        log::error!("output: ffmpeg stderr:\n{}", stderr);
+        anyhow::bail!("FFmpeg muxing error: {}", stderr);
+    }
+    log::info!("output: muxed with dub -> {}", output);
     Ok(())
 }
 

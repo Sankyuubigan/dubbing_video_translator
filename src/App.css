@@ -298,3 +298,24 @@
   color: var(--text-h);
   word-break: break-all;
 }
+
+.checkbox-card {
+  padding: 12px 16px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-h);
+  user-select: none;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}

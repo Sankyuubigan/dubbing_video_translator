@@ -359,7 +359,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     }
 
     // Декодируем пачками, а не всё сразу — иначе GPU OOM на длинных видео
-    const BATCH_SIZE: usize = 8;
+    const BATCH_SIZE: usize = 32;
     if !streams.is_empty() {
         let total = streams.len();
         let n_batches = (total + BATCH_SIZE - 1) / BATCH_SIZE;

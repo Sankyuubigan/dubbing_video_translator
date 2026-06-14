@@ -89,6 +89,7 @@ mod tests {
             stt_model: None,
             diarization_threshold: None,
             diarization_num_speakers: None,
+            enable_dubbing: false,
         };
         let ctx = PipelineContext::new(cfg);
         let result = extract(ctx);

@@ -2,11 +2,13 @@ mod audio_extractor;
 pub mod comm;
 pub mod config;
 mod diarization;
+mod download;
 mod ffmpeg;
 mod output;
 pub mod pipeline;
 mod stt;
 mod translation;
+mod tts;
 mod vad;
 
 use comm::{PipelineConfig, PipelineContext, ProgressUpdate};
@@ -227,6 +229,7 @@ fn process_video(
     vad_threshold_db: Option<String>,
     sherpa_onnx_dir: Option<String>,
     stt_model: Option<String>,
+    enable_dubbing: Option<bool>,
     app_handle: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<String, String> {
@@ -248,6 +251,7 @@ fn process_video(
         stt_model: stt_model.or(app_cfg.stt_model.clone()),
         diarization_threshold: app_cfg.diarization_threshold,
         diarization_num_speakers: app_cfg.diarization_num_speakers,
+        enable_dubbing: enable_dubbing.unwrap_or(false),
     };
 
     let handle = app_handle.clone();
@@ -413,6 +417,7 @@ pub fn run() {
                             stt_model: cfg.stt_model.clone(),
                             diarization_threshold: cfg.diarization_threshold,
                             diarization_num_speakers: cfg.diarization_num_speakers,
+                            enable_dubbing: false,
                         };
                         let ctx = comm::PipelineContext::new(pcfg);
                         log::info!("AUTO: running pipeline...");
@@ -509,6 +514,7 @@ mod tests {
             stt_model: Some(stt_model.to_string()),
             diarization_threshold: cfg.diarization_threshold,
             diarization_num_speakers: cfg.diarization_num_speakers,
+            enable_dubbing: false,
         };
         let ctx = PipelineContext::new(pipeline_cfg);
 

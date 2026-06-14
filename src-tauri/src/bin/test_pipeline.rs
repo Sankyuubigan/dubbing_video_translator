@@ -64,6 +64,7 @@ fn main() {
         stt_model: cfg.stt_model.clone(),
         diarization_threshold: cfg.diarization_threshold,
         diarization_num_speakers: cfg.diarization_num_speakers,
+        enable_dubbing: false,
     };
     let ctx = app_lib::comm::PipelineContext::new(pcfg);
 

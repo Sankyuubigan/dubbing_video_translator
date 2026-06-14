@@ -28,6 +28,7 @@ export default function App() {
   const [ffmpegPath, setFfmpegPath] = useState<string>("");
   const [vadThreshold, setVadThreshold] = useState<string>("-40");
   const [format, setFormat] = useState<string>("mp4");
+  const [enableDubbing, setEnableDubbing] = useState<boolean>(false);
   const [stage, setStage] = useState<Stage>("idle");
   const [progress, setProgress] = useState(0);
   const [progressStage, setProgressStage] = useState("");
@@ -100,6 +101,7 @@ export default function App() {
       vad_threshold_db: string | null;
       sherpa_onnx_dir: string | null;
       stt_model: string | null;
+      enable_dubbing: boolean;
     }>("get_config")
       .then((cfg) => {
         if (cfg.gguf_model_path) setGgufPath(cfg.gguf_model_path);
@@ -108,6 +110,7 @@ export default function App() {
         if (cfg.vad_threshold_db) setVadThreshold(cfg.vad_threshold_db);
         if (cfg.sherpa_onnx_dir) setSherpaOnnxDir(cfg.sherpa_onnx_dir);
         if (cfg.stt_model) setSttModel(cfg.stt_model);
+        setEnableDubbing(cfg.enable_dubbing);
       })
       .catch(() => {});
   }, []);
@@ -123,11 +126,12 @@ export default function App() {
           vad_threshold_db: vadThreshold || null,
           sherpa_onnx_dir: sherpaOnnxDir || null,
           stt_model: sttModel || null,
+          enable_dubbing: enableDubbing,
         },
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir, sttModel]);
+  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir, sttModel, enableDubbing]);
 
   const handleSelectVideo = async () => {
     const file = await open({
@@ -165,6 +169,7 @@ export default function App() {
       vadThresholdDb: vadThreshold || null,
       sherpaOnnxDir: sherpaOnnxDir || null,
       sttModel: sttModel,
+      enableDubbing: enableDubbing,
     }).catch((e) => {
       setError(String(e));
       setStage("error");
@@ -326,6 +331,17 @@ export default function App() {
                 placeholder="-30"
               />
             </div>
+          </div>
+
+          <div className="card checkbox-card">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={enableDubbing}
+                onChange={(e) => setEnableDubbing(e.target.checked)}
+              />
+              <span>Добавить русскую озвучку (TTS)</span>
+            </label>
           </div>
 
           <div className="card">

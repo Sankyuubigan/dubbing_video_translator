@@ -5,8 +5,8 @@ use sherpa_onnx::{
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractorConfig,
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const MODELS_SUBDIR: &str = "models\\diarization";
 
@@ -92,138 +92,11 @@ fn ensure_models_downloaded(models_dir: &Path) -> Result<()> {
 }
 
 fn download_file(url: &str, path: &Path) -> Result<()> {
-    // Попытка 1: PowerShell с TLS 1.2
-    let ps_result = try_download_powershell(url, path);
-    if ps_result.is_ok() {
-        return Ok(());
-    }
-    let ps_err = ps_result.unwrap_err();
-    log::warn!("Diarization: PowerShell download failed: {}", ps_err);
-
-    // Попытка 2: curl (если установлен)
-    let curl_result = try_download_curl(url, path);
-    if curl_result.is_ok() {
-        return Ok(());
-    }
-    let curl_err = curl_result.unwrap_err();
-    log::warn!("Diarization: curl download failed: {}", curl_err);
-
-    // Попытка 3: bitsadmin (встроено в Windows)
-    let bits_result = try_download_bitsadmin(url, path);
-    if bits_result.is_ok() {
-        return Ok(());
-    }
-    let bits_err = bits_result.unwrap_err();
-    log::warn!("Diarization: bitsadmin download failed: {}", bits_err);
-
-    anyhow::bail!(
-        "Не удалось скачать модель.\n\
-         URL: {}\n\
-         Путь: {}\n\
-         PowerShell: {}\n\
-         curl: {}\n\
-         bitsadmin: {}\n\n\
-         Скачайте модель вручную и положите в {}",
-        url,
-        path.display(),
-        ps_err,
-        curl_err,
-        bits_err,
-        path.display()
-    );
-}
-
-fn try_download_powershell(url: &str, path: &Path) -> Result<()> {
-    let script = format!(
-        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-         [Net.ServicePointManager]::ServerCertificateValidationCallback = {{$true}}; \
-         $p = Invoke-WebRequest -Uri \"{url}\" -OutFile \"{path}\" -UseBasicParsing -PassThru; \
-         if ($p.StatusCode -ne 200) {{ throw \"HTTP $($p.StatusCode)\" }}",
-        url = url,
-        path = path.to_string_lossy()
-    );
-
-    let output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(&script)
-        .output()
-        .context("Ошибка запуска PowerShell")?;
-
-    if output.status.success() {
-        if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 1000 {
-            return Ok(());
-        }
-        anyhow::bail!("Файл скачан, но слишком мал или отсутствует");
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!("PowerShell: {}", stderr.trim())
-}
-
-fn try_download_curl(url: &str, path: &Path) -> Result<()> {
-    // Проверяем, доступен ли curl
-    let which = Command::new("where").arg("curl").output();
-    match which {
-        Ok(out) if out.status.success() => {}
-        _ => anyhow::bail!("curl не найден"),
-    }
-
-    let output = Command::new("curl")
-        .args(&[
-            "-L",
-            "-o",
-            &path.to_string_lossy(),
-            "-f",
-            "--ssl-reqd",
-            url,
-        ])
-        .output()
-        .context("Ошибка запуска curl")?;
-
-    if output.status.success() && path.exists() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!("curl: {}", stderr.trim())
-}
-
-fn try_download_bitsadmin(url: &str, path: &Path) -> Result<()> {
-    let output = Command::new("bitsadmin")
-        .args(&[
-            "/transfer",
-            "DiarizationDownload",
-            url,
-            &path.to_string_lossy(),
-        ])
-        .output()
-        .context("Ошибка запуска bitsadmin")?;
-
-    if output.status.success() && path.exists() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!("bitsadmin: {}", stderr.trim())
+    crate::download::download_file(url, path)
 }
 
 fn extract_tar_bz2(archive: &Path, dest: &Path) -> Result<()> {
-    use std::fs::File;
-    use std::io::Read;
-
-    let file = File::open(archive)
-        .context("Ошибка открытия bz2 архива")?;
-    let mut decoder = bzip2::read::BzDecoder::new(file);
-    let mut tar_bytes = Vec::new();
-    decoder
-        .read_to_end(&mut tar_bytes)
-        .context("Ошибка декомпрессии bz2")?;
-    drop(decoder);
-
-    let mut tar_archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
-    tar_archive.unpack(dest)
-        .context("Ошибка распаковки tar архива")
+    crate::download::extract_tar_bz2(archive, dest)
 }
 
 fn load_audio(path: &str) -> Result<Vec<f32>> {
@@ -233,6 +106,123 @@ fn load_audio(path: &str) -> Result<Vec<f32>> {
         .filter_map(|s| s.ok())
         .map(|s| s as f32 / 32768.0)
         .collect())
+}
+
+fn load_wav_spec(path: &str) -> Result<(Vec<f32>, u32)> {
+    let reader = hound::WavReader::open(path).context("Ошибка открытия WAV")?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = reader
+        .into_samples::<i16>()
+        .filter_map(|s| s.ok())
+        .map(|s| s as f32 / 32768.0)
+        .collect();
+    Ok((samples, spec.sample_rate))
+}
+
+/// Определение основного тона (F0) через автокорреляцию.
+/// Возвращает медианную частоту в Гц или None, если речь не обнаружена.
+fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
+    let min_freq = 50.0;
+    let max_freq = 500.0;
+    let min_lag = (sample_rate as f64 / max_freq) as usize;
+    let max_lag = (sample_rate as f64 / min_freq) as usize;
+    let frame_size = 1024;
+    let hop_size = 512;
+
+    let mut pitches: Vec<f64> = Vec::new();
+    let mut pos = 0;
+
+    while pos + frame_size <= samples.len() {
+        let frame = &samples[pos..pos + frame_size];
+
+        let energy: f32 = frame.iter().map(|&x| x * x).sum();
+        if energy < 1e-6 {
+            pos += hop_size;
+            continue;
+        }
+
+        let mut best_lag = 0;
+        let mut best_corr = 0.0f32;
+
+        for lag in min_lag..=max_lag.min(frame_size / 2) {
+            let mut corr = 0.0f32;
+            for i in 0..(frame_size - lag) {
+                corr += frame[i] * frame[i + lag];
+            }
+            let lag_energy: f32 = frame[lag..].iter().map(|&x| x * x).sum();
+            let denom = (energy * lag_energy).sqrt();
+            if denom > 1e-8 {
+                corr /= denom;
+            }
+            if corr > best_corr {
+                best_corr = corr;
+                best_lag = lag;
+            }
+        }
+
+        if best_corr > 0.3 && best_lag > 0 {
+            pitches.push(sample_rate as f64 / best_lag as f64);
+        }
+
+        pos += hop_size;
+    }
+
+    if pitches.is_empty() {
+        return None;
+    }
+    pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(pitches[pitches.len() / 2])
+}
+
+/// Определяет пол для каждого уникального спикера на основе высоты тона.
+/// Порог: < 160 Гц → male, >= 160 Гц → female.
+fn detect_speaker_genders(
+    wav_path: &str,
+    speaker_segments: &[SpeakerSegment],
+) -> HashMap<String, String> {
+    let (samples, sample_rate) = match load_wav_spec(wav_path) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("GenderDetection: не удалось загрузить WAV: {}", e);
+            return HashMap::new();
+        }
+    };
+
+    let mut speaker_genders: HashMap<String, Vec<f64>> = HashMap::new();
+
+    for seg in speaker_segments {
+        let start_sample = (seg.start_sec * sample_rate as f64) as usize;
+        let end_sample = (seg.end_sec * sample_rate as f64) as usize;
+        if end_sample > samples.len() || start_sample >= end_sample {
+            continue;
+        }
+        let seg_samples = &samples[start_sample..end_sample];
+        if let Some(pitch) = estimate_median_pitch(seg_samples, sample_rate) {
+            speaker_genders
+                .entry(seg.speaker_id.clone())
+                .or_default()
+                .push(pitch);
+        }
+    }
+
+    let mut result = HashMap::new();
+    for (speaker_id, pitches) in &speaker_genders {
+        if pitches.is_empty() {
+            continue;
+        }
+        let mut sorted = pitches.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted[sorted.len() / 2];
+        let gender = if median < 160.0 { "male" } else { "female" };
+        log::info!(
+            "GenderDetection: {} median pitch={:.0} Hz → {}",
+            speaker_id,
+            median,
+            gender
+        );
+        result.insert(speaker_id.clone(), gender.to_string());
+    }
+    result
 }
 
 /// Минимальное расстояние между двумя сегментами (0 если пересекаются).
@@ -746,6 +736,7 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
             start_sec: s.start as f64,
             end_sec: s.end as f64,
             speaker_id: format!("Speaker_{}", s.speaker + 1),
+            gender: None,
         })
         .collect();
 
@@ -789,6 +780,16 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
         }
         None => None,
     };
+
+    // Определяем пол спикеров через анализ высоты тона
+    let genders = detect_speaker_genders(&wav_path, &speaker_segments);
+    let speaker_segments: Vec<SpeakerSegment> = speaker_segments
+        .into_iter()
+        .map(|mut seg| {
+            seg.gender = genders.get(&seg.speaker_id).cloned();
+            seg
+        })
+        .collect();
 
     Ok(PipelineContext {
         speaker_segments: Some(speaker_segments),

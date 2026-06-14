@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub diarization_models_dir: Option<String>,
     pub diarization_threshold: Option<f64>,
     pub diarization_num_speakers: Option<i32>,
+    pub enable_dubbing: bool,
 }
 
 impl Default for AppConfig {
@@ -29,6 +30,7 @@ impl Default for AppConfig {
             diarization_models_dir: None,
             diarization_threshold: None,
             diarization_num_speakers: None,
+            enable_dubbing: false,
         }
     }
 }

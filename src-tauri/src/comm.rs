@@ -33,6 +33,7 @@ pub struct PipelineConfig {
     pub stt_model: Option<String>,
     pub diarization_threshold: Option<f64>,
     pub diarization_num_speakers: Option<i32>,
+    pub enable_dubbing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +45,7 @@ pub struct PipelineContext {
     pub subtitle_chunks: Option<Vec<SubtitleChunk>>,
     pub speaker_segments: Option<Vec<SpeakerSegment>>,
     pub translated_chunks: Option<Vec<SubtitleChunk>>,
+    pub dubbed_audio_path: Option<String>,
     pub output_path: Option<String>,
 }
 
@@ -71,6 +73,7 @@ impl PipelineContext {
             subtitle_chunks: None,
             speaker_segments: None,
             translated_chunks: None,
+            dubbed_audio_path: None,
             output_path: None,
         }
     }
@@ -81,6 +84,7 @@ pub struct SpeakerSegment {
     pub start_sec: f64,
     pub end_sec: f64,
     pub speaker_id: String,
+    pub gender: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
