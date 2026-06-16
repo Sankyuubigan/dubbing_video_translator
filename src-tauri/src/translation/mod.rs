@@ -11,13 +11,86 @@ use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
 
-const MAX_N_CTX: u32 = 1024;
+const MAX_N_CTX: u32 = 8192;
+const MAX_CONTEXT_CHUNKS: usize = 12;
+const SAMPLING_TEMP: f32 = 0.15;
+const SAMPLING_TOP_K: i32 = 40;
+const SAMPLING_TOP_P: f32 = 0.90;
+const SAMPLING_REP_PENALTY: f32 = 1.0;
 
-fn build_prompt(text: &str) -> String {
-    format!(
-        "<start_of_turn>user\nTranslate the following text into Russian. Fix STT errors. Output only the translation — no explanations, no options.\n\n{}<end_of_turn>\n<start_of_turn>model\n",
-        text
-    )
+fn build_prompt(text: &str, prev_chunks: &[(String, String)]) -> String {
+    let mut p = String::from("<|turn>system\nYou are an expert professional translator of video subtitles from English to Russian. The English text is a raw Speech-to-Text transcript and may contain phonetic recognition errors (e.g., 'sea' instead of 'C', 'Three to C' instead of '32C', 'I' instead of 'It'). Fix these errors based on the conversation context. Maintain correct speaker gender, pronouns, and topic consistency. Output ONLY the final Russian translation. Do not provide explanations or multiple options.<turn|>\n<|turn>user");
+
+    if !prev_chunks.is_empty() {
+        p.push_str("\n\nPrevious dialogue context:");
+        for (en, ru) in prev_chunks.iter() {
+            p.push_str(&format!("\nEN: {}\nRU: {}", en, ru));
+        }
+    }
+
+    p.push_str(&format!("\n\nTranslate the following text into Russian. Output only the translation.\n\n{}\n<turn|>\n<|turn>model\n", text));
+
+    p
+}
+
+fn clean_output(output: &str) -> String {
+    // Strip everything before the first Russian/Cyrillic character
+    let output = if let Some(pos) = output.find(|c: char| ('А'..='я').contains(&c) || c == '«' || c == 'ё' || c == 'Ё') {
+        &output[pos..]
+    } else {
+        let output = output.trim();
+        if let Some(pos) = output.find(|c: char| c.is_alphabetic() && !c.is_whitespace()) {
+            &output[pos..]
+        } else {
+            ""
+        }
+    };
+    // Strip after any angle-bracket patterns: <..., <|..., ...|>
+    let output = if let Some(pos) = output.find('<') {
+        &output[..pos]
+    } else {
+        output
+    };
+    // Strip trailing "thought" word (artifact from <|channel>thought)
+    let output = output.trim_end().strip_suffix("thought").map(|s| s.trim_end()).unwrap_or(output.trim_end());
+    // Remove known prefixes
+    let output = output.trim();
+    let known_prefixes = ["Russian: ", "Russian : ", "Translation: ", "RU: ", "Перевод: "];
+    let output = if let Some(rest) = known_prefixes.iter().find_map(|p| output.strip_prefix(p)) {
+        rest.trim()
+    } else {
+        output
+    };
+    // Strip trailing English/Latin text after the last Cyrillic character
+    let output = {
+        let s = output.trim_end();
+        if let Some(pos) = s.rfind(|c: char| ('А'..='я').contains(&c) || c == '«' || c == 'Ё' || c == 'ё') {
+            let after_cyr = &s[pos..];
+            let cyr_len = after_cyr.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            let tail = &s[pos + cyr_len..];
+            let allowed_bytes: usize = tail.chars().take_while(|c| {
+                c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ':' | ';' | '-' | '—' | '…' | ')' | ']' | '}' | '»' | '"')
+            }).map(|c| c.len_utf8()).sum();
+            if allowed_bytes < tail.len() {
+                let keep = pos + cyr_len + allowed_bytes;
+                s[..keep].trim_end().to_string()
+            } else {
+                s.to_string()
+            }
+        } else {
+            s.to_string()
+        }
+    };
+    // If multiple lines remain, model likely generated multiple translation candidates;
+    // keep only the last (most refined) line
+    let output = output.trim();
+    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let output = if lines.len() > 1 {
+        lines.last().unwrap().trim()
+    } else {
+        output
+    };
+    output.trim().to_string()
 }
 
 fn generate<'a>(
@@ -25,9 +98,9 @@ fn generate<'a>(
     ctx: &mut LlamaContext<'a>,
     sampler: &mut LlamaSampler,
     prompt: &str,
-) -> Result<(Vec<LlamaToken>, bool)> {
+    eos: LlamaToken,
+) -> Result<Vec<LlamaToken>> {
     let tokens = model.str_to_token(prompt, AddBos::Always)?;
-    let input_token_count = tokens.len();
 
     let mut batch_llm = LlamaBatch::new(tokens.len(), 1);
     for (i, t) in tokens.iter().enumerate() {
@@ -35,10 +108,8 @@ fn generate<'a>(
     }
     ctx.decode(&mut batch_llm)?;
 
-    let eos = model.token_eos();
-    let max_new = (input_token_count / 2).max(64).min(1024);
+    let max_new = (tokens.len() / 2).max(64).min(512);
     let mut output_toks = Vec::new();
-    let mut generation_ok = true;
     let mut ctx_pos = batch_llm.n_tokens() as i32;
 
     for _ in 0..max_new {
@@ -47,34 +118,29 @@ fn generate<'a>(
 
         let token = match cur_p.selected_token() {
             Some(t) => t,
-            None => {
-                log::warn!("Перевод: ни один токен не выбран");
-                generation_ok = false;
-                break;
-            }
+            None => break,
         };
-        sampler.accept(token);
 
-        if token == eos || token == LlamaToken(1) || token == LlamaToken(213) {
+        if token == eos {
             break;
         }
+
+        sampler.accept(token);
         output_toks.push(token);
 
         let mut nb = LlamaBatch::new(1, 1);
         if let Err(e) = nb.add(token, ctx_pos, &[0], true) {
             log::warn!("Перевод: ошибка batch.add: {:#}", e);
-            generation_ok = false;
             break;
         }
         if let Err(e) = ctx.decode(&mut nb) {
             log::warn!("Перевод: ошибка decode: {:#}", e);
-            generation_ok = false;
             break;
         }
         ctx_pos += 1;
     }
 
-    Ok((output_toks, generation_ok))
+    Ok(output_toks)
 }
 
 fn decode_tokens(model: &LlamaModel, tokens: &[LlamaToken]) -> String {
@@ -143,16 +209,23 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
 
     let mut ctx_llm = model.new_context(
         backend,
-        LlamaContextParams::default().with_n_ctx(NonZeroU32::new(MAX_N_CTX)),
+        LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(MAX_N_CTX))
+            .with_n_batch(MAX_N_CTX),
     )?;
 
     let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::penalties(-1, 1.05, 0.0, 0.0),
-        LlamaSampler::temp(0.0),
+        LlamaSampler::penalties(512, SAMPLING_REP_PENALTY, 0.0, 0.0),
+        LlamaSampler::top_k(SAMPLING_TOP_K),
+        LlamaSampler::top_p(SAMPLING_TOP_P, 1),
+        LlamaSampler::temp(SAMPLING_TEMP),
         LlamaSampler::dist(42),
     ]);
 
+    let eos = model.token_eos();
+
     let mut result: Vec<SubtitleChunk> = Vec::new();
+    let mut prev_chunks: Vec<(String, String)> = Vec::new();
 
     for chunk in chunks {
         if crate::is_cancelled() {
@@ -164,7 +237,7 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
             continue;
         }
 
-        let prompt = build_prompt(&chunk.text);
+        let prompt = build_prompt(&chunk.text, &prev_chunks);
 
         let tokens = match model.str_to_token(&prompt, AddBos::Always) {
             Ok(t) => t,
@@ -174,44 +247,61 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
                     text: format!("[{}]", chunk.text),
                     ..chunk.clone()
                 });
+                prev_chunks.push((chunk.text.clone(), String::new()));
+                if prev_chunks.len() > MAX_CONTEXT_CHUNKS {
+                    prev_chunks.remove(0);
+                }
                 continue;
             }
         };
 
-        if tokens.len() + 128 > MAX_N_CTX as usize {
+        let max_new = 4096.min(MAX_N_CTX as usize - tokens.len() - 50);
+        if max_new < 16 {
             log::warn!("Перевод: промпт слишком длинный ({} токенов), fallback", tokens.len());
             result.push(SubtitleChunk {
                 text: format!("[{}]", chunk.text),
                 ..chunk.clone()
             });
+            prev_chunks.push((chunk.text.clone(), String::new()));
+            if prev_chunks.len() > MAX_CONTEXT_CHUNKS {
+                prev_chunks.remove(0);
+            }
             continue;
         }
 
         ctx_llm.clear_kv_cache();
         sampler.reset();
 
-        let (toks, ok) = generate(&model, &mut ctx_llm, &mut sampler, &prompt)?;
-        let output = if ok {
-            decode_tokens(&model, &toks)
-        } else {
-            log::warn!("Перевод: генерация не удалась для '{}'", chunk.text);
-            String::new()
-        };
+        let toks = generate(&model, &mut ctx_llm, &mut sampler, &prompt, eos)?;
+        let raw = decode_tokens(&model, &toks);
+        let chunk_preview: String = chunk.text.chars().take(20).collect();
+        let raw_start: String = raw.chars().take(80).collect();
+        let raw_end: String = raw.chars().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
+        log::info!("Перевод: чанк '{}' -> {} токенов, raw_start='{}', raw_end='{}'", chunk_preview, toks.len(), raw_start, raw_end);
+        let output = clean_output(&raw);
 
-        let text = output.trim();
-        let translated = if text.is_empty() {
-            log::warn!("Перевод: пустой вывод для '{}', fallback", chunk.text);
+        let translated = if output.is_empty() {
+            log::warn!("Перевод: пустой вывод для '{}' ({} токенов)", chunk.text, toks.len());
             SubtitleChunk {
                 text: format!("[{}]", chunk.text),
                 ..chunk.clone()
             }
         } else {
             SubtitleChunk {
-                text: text.to_string(),
+                text: output,
                 ..chunk.clone()
             }
         };
 
+        let ru_trimmed = if translated.text.chars().count() > 200 {
+            translated.text.chars().take(200).collect::<String>()
+        } else {
+            translated.text.clone()
+        };
+        prev_chunks.push((chunk.text.clone(), ru_trimmed));
+        if prev_chunks.len() > MAX_CONTEXT_CHUNKS {
+            prev_chunks.remove(0);
+        }
         result.push(translated);
     }
 
@@ -228,11 +318,88 @@ mod tests {
 
     #[test]
     fn test_build_prompt_format() {
-        let prompt = build_prompt("Hello world");
+        let prompt = build_prompt("Hello world", &[]);
         assert!(prompt.contains("Hello world"));
-        assert!(prompt.contains("Translate the following text into Russian"));
-        assert!(prompt.contains("<start_of_turn>user"));
-        assert!(prompt.contains("<start_of_turn>model"));
-        assert!(prompt.contains("<end_of_turn>"));
+        assert!(prompt.contains("<|turn>system"));
+        assert!(prompt.contains("<|turn>user"));
+        assert!(prompt.contains("<turn|>"));
+        assert!(prompt.contains("<|turn>model"));
+        assert!(prompt.contains("expert professional translator"));
+        assert!(!prompt.contains("Fix any ASR errors"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_context() {
+        let ctx = vec![("First EN text".to_string(), "Первая".to_string())];
+        let prompt = build_prompt("Second", &ctx);
+        assert!(prompt.contains("Second"));
+        assert!(prompt.contains("Previous dialogue context"));
+        assert!(prompt.contains("Первая"));
+        assert!(prompt.contains("First EN text"));
+        assert!(prompt.contains("EN:"));
+        assert!(prompt.contains("RU:"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_multiple_contexts() {
+        let ctx = vec![
+            ("First EN".to_string(), "Первая".to_string()),
+            ("Second EN".to_string(), "Вторая".to_string()),
+            ("Third EN".to_string(), "Третья".to_string()),
+        ];
+        let prompt = build_prompt("Fourth", &ctx);
+        assert!(prompt.contains("Fourth"));
+        assert!(prompt.contains("First EN"));
+        assert!(prompt.contains("Second EN"));
+        assert!(prompt.contains("Third EN"));
+        assert!(prompt.contains("Первая"));
+        assert!(prompt.contains("Вторая"));
+        assert!(prompt.contains("Третья"));
+    }
+
+    #[test]
+    fn test_clean_output_plain_text() {
+        assert_eq!(clean_output("Привет мир"), "Привет мир");
+    }
+
+    #[test]
+    fn test_clean_output_strips_garbage_prefix() {
+        let out = clean_output("<|channel>thought<channel|>Привет мир");
+        assert_eq!(out, "Привет мир", "garbage prefix stripped");
+    }
+
+    #[test]
+    fn test_clean_output_strips_turn_end() {
+        let out = clean_output("Привет мир<turn|>\n<|turn>model");
+        assert_eq!(out, "Привет мир", "turn suffix stripped");
+    }
+
+    #[test]
+    fn test_clean_output_empty() {
+        assert_eq!(clean_output(""), "");
+    }
+
+    #[test]
+    fn test_clean_output_prefixes() {
+        assert_eq!(clean_output("Russian: Привет"), "Привет");
+        assert_eq!(clean_output("Translation: Как дела?"), "Как дела?");
+        assert_eq!(clean_output("RU: Привет"), "Привет");
+        assert_eq!(clean_output("Перевод: Привет"), "Привет");
+    }
+
+    #[test]
+    fn test_clean_output_trailing_english() {
+        assert_eq!(clean_output("Привет мир (let's go with)"), "Привет мир");
+        assert_eq!(clean_output("Привет мир. (Thought) yeah"), "Привет мир.");
+        assert_eq!(clean_output("Привет мир High confidence"), "Привет мир");
+        assert_eq!(clean_output("Привет мир. (Let's go with"), "Привет мир.");
+        assert_eq!(clean_output("девочка./крошка. (Let's go with"), "девочка./крошка.");
+    }
+
+    #[test]
+    fn test_clean_output_keeps_valid_russian() {
+        assert_eq!(clean_output("Привет мир."), "Привет мир.");
+        assert_eq!(clean_output("Как дела?"), "Как дела?");
+        assert_eq!(clean_output("Отлично!"), "Отлично!");
     }
 }
