@@ -12,14 +12,14 @@ use std::num::NonZeroU32;
 use std::path::Path;
 
 const MAX_N_CTX: u32 = 8192;
-const MAX_CONTEXT_CHUNKS: usize = 12;
+const MAX_CONTEXT_CHUNKS: usize = 8;
 const SAMPLING_TEMP: f32 = 0.15;
 const SAMPLING_TOP_K: i32 = 40;
 const SAMPLING_TOP_P: f32 = 0.90;
 const SAMPLING_REP_PENALTY: f32 = 1.0;
 
 fn build_prompt(text: &str, prev_chunks: &[(String, String)]) -> String {
-    let mut p = String::from("<|turn>system\nYou are an expert professional translator of video subtitles from English to Russian. The English text is a raw Speech-to-Text transcript and may contain phonetic recognition errors (e.g., 'sea' instead of 'C', 'Three to C' instead of '32C', 'I' instead of 'It'). Fix these errors based on the conversation context. Maintain correct speaker gender, pronouns, and topic consistency. Output ONLY the final Russian translation. Do not provide explanations or multiple options.<turn|>\n<|turn>user");
+    let mut p = String::from("<|turn>system\nYou are an expert translator of video subtitles (English to Russian). The text is a raw Speech-to-Text transcript with phonetic errors. You MUST rely on the 'Previous dialogue context' to understand the topic.\n\nRULES:\n1. Fix ASR errors by sound.\n2. Translate contextually.\n3. Keep the translation natural and conversational.\n4. Output ONLY the final Russian translation without quotes, notes, or explanations.\n5. Convert imperial units (feet, inches, Fahrenheit, pounds, etc.) to metric for the Russian audience (e.g. 5'7\" → 170 cm, 32°F → 0°C). Do this naturally without explicit conversion notes.<turn|>\n<|turn>user");
 
     if !prev_chunks.is_empty() {
         p.push_str("\n\nPrevious dialogue context:");
@@ -28,7 +28,7 @@ fn build_prompt(text: &str, prev_chunks: &[(String, String)]) -> String {
         }
     }
 
-    p.push_str(&format!("\n\nTranslate the following text into Russian. Output only the translation.\n\n{}\n<turn|>\n<|turn>model\n", text));
+    p.push_str(&format!("\n\nTranslate the following text into Russian. Output only the translation.\n\n{}\n<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", text));
 
     p
 }
@@ -99,6 +99,7 @@ fn generate<'a>(
     sampler: &mut LlamaSampler,
     prompt: &str,
     eos: LlamaToken,
+    max_new: usize,
 ) -> Result<Vec<LlamaToken>> {
     let tokens = model.str_to_token(prompt, AddBos::Always)?;
 
@@ -108,7 +109,6 @@ fn generate<'a>(
     }
     ctx.decode(&mut batch_llm)?;
 
-    let max_new = (tokens.len() / 2).max(64).min(512);
     let mut output_toks = Vec::new();
     let mut ctx_pos = batch_llm.n_tokens() as i32;
 
@@ -127,6 +127,12 @@ fn generate<'a>(
 
         sampler.accept(token);
         output_toks.push(token);
+
+        // Early stopping: if model tries to open a new channel or turn, stop
+        let current_text = decode_tokens(model, &output_toks);
+        if current_text.contains("<|channel>") || current_text.contains("<turn|>") || current_text.contains("\n\n") {
+            break;
+        }
 
         let mut nb = LlamaBatch::new(1, 1);
         if let Err(e) = nb.add(token, ctx_pos, &[0], true) {
@@ -255,7 +261,7 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
             }
         };
 
-        let max_new = 4096.min(MAX_N_CTX as usize - tokens.len() - 50);
+        let max_new = 150.min(MAX_N_CTX as usize - tokens.len() - 50);
         if max_new < 16 {
             log::warn!("Перевод: промпт слишком длинный ({} токенов), fallback", tokens.len());
             result.push(SubtitleChunk {
@@ -272,7 +278,7 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         ctx_llm.clear_kv_cache();
         sampler.reset();
 
-        let toks = generate(&model, &mut ctx_llm, &mut sampler, &prompt, eos)?;
+        let toks = generate(&model, &mut ctx_llm, &mut sampler, &prompt, eos, max_new)?;
         let raw = decode_tokens(&model, &toks);
         let chunk_preview: String = chunk.text.chars().take(20).collect();
         let raw_start: String = raw.chars().take(80).collect();
@@ -324,7 +330,7 @@ mod tests {
         assert!(prompt.contains("<|turn>user"));
         assert!(prompt.contains("<turn|>"));
         assert!(prompt.contains("<|turn>model"));
-        assert!(prompt.contains("expert professional translator"));
+        assert!(prompt.contains("expert translator"));
         assert!(!prompt.contains("Fix any ASR errors"));
     }
 
