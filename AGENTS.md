@@ -4,7 +4,7 @@
 - **Backend:** Rust + Tauri 2.0, `llama-cpp-2` v0.1.146 (CUDA), `sherpa-onnx` v1.13.2
 - **Frontend:** React/TypeScript
 - **Media:** FFmpeg (external, audio extraction + subtitle muxing)
-- **Models:** Silero VAD v5, PyAnnote + TitaNet (diarization), Qwen3-ASR (STT), Tower-Plus-9B (translation)
+- **Models:** Silero VAD v5, PyAnnote + TitaNet (diarization), Qwen3-ASR (STT), Gemma-4-12B (translation)
 
 ## Architecture
 Modules are isolated — they don't import each other directly. All communication goes through `comm.rs` (PipelineContext hub).
@@ -15,7 +15,7 @@ Pipeline order (DON'T CHANGE):
 2. vad — Voice Activity Detection (Silero VAD v5, .onnx via sherpa-onnx)
 3. diarization — Speaker Identification (PyAnnote + TitaNet, .onnx via sherpa-onnx)
 4. stt — Speech-to-Text (Qwen3-ASR, .onnx via sherpa-onnx) with speaker-aware slicing
-5. translation — LLM translation (Tower-Plus-9B GGUF via llama-cpp-2)
+5. translation — LLM translation (Gemma-4-12B GGUF via llama-cpp-2)
 6. output — burn subtitles into video via FFmpeg
 ```
 
@@ -34,31 +34,43 @@ Models are loaded one at a time and dropped before the next (VRAM safety).
 - **Context window:** 8192 tokens
 
 ### Prompt format
-**Gemma 4 turn format** (uses `<|turn>`/`<turn|>` control tokens):
+**Gemma 4 turn format** with **Chain of Thought** (uses `<|turn>`/`<turn|>` control tokens + `<|channel>thought` for internal reasoning):
 
 ```
 <|turn>system
-You are a professional translator. Translate English subtitles to Russian. Use previous dialogue segments to resolve pronouns and maintain topic consistency. Output only the translation, no explanations.<turn|>
+You are a top-tier audiovisual translator and dubbing adapter. Translate English to Russian.
+
+STRICT RULES:
+1. ASR FIX: The source text has Speech-to-Text errors. Fix them contextually.
+2. DUBBING LENGTH (ISOCHRONY): Russian text MUST be exactly as short as the English text so it fits the audio timing. Drop filler words, use short synonyms. CONCISE IS KING.
+3. METRIC: Convert imperial units to metric (e.g., 'Five seven' -> '170 см', '32C' -> '32C').
+4. GENDER: Current speaker is [SPEAKER_GENDER]. Match Russian verbs/adjectives to this gender.
+5. TONE: Preserve slang, cursing, or formality.
+
+PROCESS:
+First, use <|channel>thought to analyze context, fix ASR errors, and compress the text length.
+Then, output ONLY the final Russian translation in the normal channel.<turn|>
 <|turn>user
 
-Previous dialogue:
-   1. EN: "prev text"
-      RU: "prev translation"
-   2. EN: "older text"
-      RU: "older translation"
+Previous context:
+EN: prev text
+RU: prev translation
 
-Translate the following text into Russian. Fix any ASR errors. Output only the Russian translation.
+Future context (DO NOT translate yet):
+EN: next text
 
-source text<turn|>
+Translate this current text:
+EN: source text<turn|>
 <|turn>model
+<|channel>thought
 ```
 
 - BOS token is prepended automatically via `AddBos::Always`
-- Context: up to 3 previous (EN, RU) pairs in reverse order (most recent first)
+- Context: up to 3 previous (EN, RU) pairs in order (most recent first), plus up to 3 lookahead (EN only)
 - Source-side context (EN) is critical — research shows it contributes more than target-side
-- Output is plain Russian text (no JSON, no grammar)
-- Generation stops at EOS token 3
-- `clean_output` strips `<|...>` garbage tokens, known prefixes, and trailing artifacts
+- Model first generates Chain of Thought (analysis, ASR fix, draft), then `<channel|>`, then final Russian answer
+- Generation stops at EOS token 3 or `<turn|>`
+- `clean_output` extracts text after `<channel|>` (if present), then strips `<|...>` garbage tokens, known prefixes, and trailing artifacts
 
 ### Sampling chain (in order)
 1. `LlamaSampler::penalties(512, 1.05, 0.0, 0.0)` — repetition penalty
@@ -72,13 +84,13 @@ source text<turn|>
 - KV cache cleared per chunk: `ctx.clear_kv_cache()` + `sampler.reset()`
 - Context window: 8192 tokens
 - EOS check (token 3) in generation loop as safety stop
-- `clean_output` pipeline: strip before first Cyrillic → strip from `<` → strip "thought" suffix → strip known prefixes → strip trailing non-Cyrillic after last Cyrillic char → keep only last line if multiline (multiple candidates)
+- `clean_output` pipeline: extract after `<channel|>` (CoT) → strip before first Cyrillic → strip from `<` → strip "thought" suffix → strip known prefixes → strip trailing non-Cyrillic after last Cyrillic char → keep only last line if multiline (multiple candidates)
 
 ### Key differences from Tower-Plus-9B
 - **`AddBos::Always`** — BOS needed before `<|turn>` tokens (same as Tower-Plus-9B)
 - **temp=1.0** instead of 0.15 — official Gemma 4 recommendation
 - **top_k=64, top_p=0.95** — wider sampling for better translation diversity
-- **Plain instruction prompt** — no turn tokens (Gemma 2-style format, Gemma 4 doesn't treat `<|turn>` as single SPM tokens)
+- **Chain of Thought** — `<|channel>thought` for internal reasoning before final answer
 - **12B params** — better STT error correction and context understanding
 
 ## Testing
@@ -124,10 +136,11 @@ File: `~/.dubvidtra2/config.toml`
 Fields: `gguf_model_path`, `sherpa_onnx_dir`, `stt_model`, `ffmpeg_path`, `vad_threshold_db`, `diarization_threshold`, `diarization_num_speakers`, `output_format`
 
 ## Known Issues
-- Occasional STT errors not corrected (e.g., "sea" → "море" instead of "sight" → "зрелище") — 9B model limitation
+- Occasional STT errors not corrected (e.g., "sea" → "море" instead of "sight" → "зрелище") — 12B model limitation
 - "spотыкалась" instead of "соскальзывал" for "slipped" context — model doesn't infer the tube top slip meaning
 - `cargo test --lib` crashes at runtime due to DLL search path in debug mode
 - sccache wrapper in global cargo config breaks C++ builds
+- CoT occasionally produces "thought: ..." prefix instead of proper `<|channel>thought` format — handled by `clean_output`
 
 ## Relevant Source Files
 | File | Purpose |
