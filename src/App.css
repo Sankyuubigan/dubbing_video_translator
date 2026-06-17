@@ -319,3 +319,17 @@
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+.slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.slider-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 2px;
+}

@@ -252,6 +252,7 @@ fn process_video(
         diarization_threshold: app_cfg.diarization_threshold,
         diarization_num_speakers: app_cfg.diarization_num_speakers,
         enable_dubbing: enable_dubbing.unwrap_or(false),
+        mix_volume: app_cfg.mix_volume,
     };
 
     let handle = app_handle.clone();
@@ -418,6 +419,7 @@ pub fn run() {
                             diarization_threshold: cfg.diarization_threshold,
                             diarization_num_speakers: cfg.diarization_num_speakers,
                             enable_dubbing: false,
+                            mix_volume: cfg.mix_volume,
                         };
                         let ctx = comm::PipelineContext::new(pcfg);
                         log::info!("AUTO: running pipeline...");

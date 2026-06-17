@@ -15,7 +15,11 @@ pub struct AppConfig {
     pub diarization_threshold: Option<f64>,
     pub diarization_num_speakers: Option<i32>,
     pub enable_dubbing: bool,
+    #[serde(default = "default_mix_volume")]
+    pub mix_volume: f64,
 }
+
+fn default_mix_volume() -> f64 { 0.15 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -31,6 +35,7 @@ impl Default for AppConfig {
             diarization_threshold: None,
             diarization_num_speakers: None,
             enable_dubbing: false,
+            mix_volume: 0.15,
         }
     }
 }

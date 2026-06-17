@@ -51,6 +51,7 @@ pub fn mux(ctx: PipelineContext) -> Result<PipelineContext> {
         &srt_ru,
         &fmt,
         &ctx.config.ffmpeg_path,
+        ctx.config.mix_volume,
         ctx.dubbed_audio_path.as_deref(),
     ) {
         Ok(path) => path,
@@ -72,6 +73,7 @@ fn try_mux(
     srt_ru: &str,
     fmt: &str,
     ffmpeg_cfg: &Option<String>,
+    mix_volume: f64,
     dubbed_audio: Option<&str>,
 ) -> Result<String> {
     let output_path = generate_output_path(input, fmt);
@@ -84,7 +86,7 @@ fn try_mux(
 
     let ffmpeg = crate::ffmpeg::resolve(ffmpeg_cfg);
     if let Some(dub_path) = dubbed_audio {
-        run_ffmpeg_mux_with_dub(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec, dub_path)?;
+        run_ffmpeg_mux_with_dub(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec, dub_path, mix_volume)?;
     } else {
         run_ffmpeg_mux(&ffmpeg, input, srt_en, srt_ru, &output_path, sub_codec)?;
     }
@@ -133,6 +135,7 @@ fn run_ffmpeg_mux_with_dub(
     output: &str,
     sub_codec: &str,
     dubbed_audio: &str,
+    mix_volume: f64,
 ) -> Result<()> {
     let mut cmd = Command::new(ffmpeg);
     cmd.creation_flags(CREATE_NO_WINDOW)
@@ -143,7 +146,7 @@ fn run_ffmpeg_mux_with_dub(
         .arg("-sub_charenc").arg("UTF-8")
         .arg("-i").arg(srt_ru)
         .arg("-filter_complex")
-        .arg("[0:a]volume=0.15[orig];[orig][1:a]amix=inputs=2:duration=first:dropout_transition=2[aout]")
+        .arg(format!("[0:a]volume={}[orig];[orig][1:a]amix=inputs=2:duration=first:dropout_transition=2[aout]", mix_volume))
         .arg("-map").arg("0:v")
         .arg("-map").arg("[aout]")
         .arg("-map").arg("0:a")

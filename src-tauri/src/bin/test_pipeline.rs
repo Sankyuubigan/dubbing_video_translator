@@ -65,6 +65,7 @@ fn main() {
         diarization_threshold: cfg.diarization_threshold,
         diarization_num_speakers: cfg.diarization_num_speakers,
         enable_dubbing: false,
+        mix_volume: cfg.mix_volume,
     };
     let ctx = app_lib::comm::PipelineContext::new(pcfg);
 

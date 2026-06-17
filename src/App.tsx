@@ -29,6 +29,7 @@ export default function App() {
   const [vadThreshold, setVadThreshold] = useState<string>("-40");
   const [format, setFormat] = useState<string>("mp4");
   const [enableDubbing, setEnableDubbing] = useState<boolean>(false);
+  const [mixVolume, setMixVolume] = useState<number>(15);
   const [stage, setStage] = useState<Stage>("idle");
   const [progress, setProgress] = useState(0);
   const [progressStage, setProgressStage] = useState("");
@@ -102,6 +103,7 @@ export default function App() {
       sherpa_onnx_dir: string | null;
       stt_model: string | null;
       enable_dubbing: boolean;
+      mix_volume: number;
     }>("get_config")
       .then((cfg) => {
         if (cfg.gguf_model_path) setGgufPath(cfg.gguf_model_path);
@@ -111,6 +113,7 @@ export default function App() {
         if (cfg.sherpa_onnx_dir) setSherpaOnnxDir(cfg.sherpa_onnx_dir);
         if (cfg.stt_model) setSttModel(cfg.stt_model);
         setEnableDubbing(cfg.enable_dubbing);
+        setMixVolume(Math.round(cfg.mix_volume * 100));
       })
       .catch(() => {});
   }, []);
@@ -127,11 +130,12 @@ export default function App() {
           sherpa_onnx_dir: sherpaOnnxDir || null,
           stt_model: sttModel || null,
           enable_dubbing: enableDubbing,
+          mix_volume: mixVolume / 100,
         },
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir, sttModel, enableDubbing]);
+  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir, sttModel, enableDubbing, mixVolume]);
 
   const handleSelectVideo = async () => {
     const file = await open({
@@ -343,6 +347,24 @@ export default function App() {
               <span>Добавить русскую озвучку (TTS)</span>
             </label>
           </div>
+
+          {enableDubbing && (
+            <div className="card">
+              <label>Громкость оригинального звука: {mixVolume}%</label>
+              <input
+                type="range"
+                min="15"
+                max="80"
+                value={mixVolume}
+                onChange={(e) => setMixVolume(Number(e.target.value))}
+                className="slider"
+              />
+              <div className="slider-labels">
+                <span>15%</span>
+                <span>80%</span>
+              </div>
+            </div>
+          )}
 
           <div className="card">
             <label>Выходной формат</label>

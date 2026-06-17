@@ -34,6 +34,7 @@ pub struct PipelineConfig {
     pub diarization_threshold: Option<f64>,
     pub diarization_num_speakers: Option<i32>,
     pub enable_dubbing: bool,
+    pub mix_volume: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
