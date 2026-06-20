@@ -7,9 +7,9 @@ const MODELS_SUBDIR: &str = "models\\vad";
 const MODEL_FILENAME: &str = "silero_vad.onnx";
 const MODEL_URL: &str = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx";
 
-const MIN_SEGMENT_SEC: f64 = 0.3;
-const PADDING_SEC: f64 = 0.15;
-const MERGE_GAP_SEC: f64 = 0.5;
+const MIN_SEGMENT_SEC: f64 = 0.2;
+const PADDING_SEC: f64 = 0.1;
+const MERGE_GAP_SEC: f64 = 0.1;
 
 fn project_root() -> PathBuf {
     if cfg!(debug_assertions) {
@@ -172,28 +172,37 @@ pub fn detect(ctx: PipelineContext) -> Result<PipelineContext> {
     let vad_config = sherpa_onnx::VadModelConfig {
         silero_vad: sherpa_onnx::SileroVadModelConfig {
             model: Some(model_path.to_string_lossy().to_string()),
-            threshold: 0.3,
-            min_silence_duration: 0.3,
-            min_speech_duration: 0.1,
-            max_speech_duration: 8.0,
+            threshold: 0.2,
+            min_silence_duration: 0.25,
+            min_speech_duration: 0.25,
+            max_speech_duration: 30.0,
             window_size: 512,
         },
         sample_rate: spec.sample_rate as i32,
         ..Default::default()
     };
 
-    let vad = sherpa_onnx::VoiceActivityDetector::create(&vad_config, 3.0)
+    let vad = sherpa_onnx::VoiceActivityDetector::create(&vad_config, 180.0)
         .context("Ошибка создания VoiceActivityDetector — проверьте модель")?;
 
-    // Подаём аудио порциями, чтобы VAD мог выдавать промежуточные сегменты
     let chunk_size = 512;
+    let sr = spec.sample_rate as f64;
+    let mut raw_segments: Vec<TimeSegment> = Vec::new();
+
     for chunk in samples.chunks(chunk_size) {
         vad.accept_waveform(chunk);
+        while let Some(seg) = vad.front() {
+            let start_sample = seg.start() as f64;
+            let n_samples = seg.n() as f64;
+            raw_segments.push(TimeSegment {
+                start_sec: ((start_sample / sr) - PADDING_SEC).max(0.0),
+                end_sec: (((start_sample + n_samples) / sr) + PADDING_SEC).min(total_duration),
+            });
+            vad.pop();
+        }
     }
     vad.flush();
 
-    let sr = spec.sample_rate as f64;
-    let mut raw_segments: Vec<TimeSegment> = Vec::new();
     while let Some(seg) = vad.front() {
         let start_sample = seg.start() as f64;
         let n_samples = seg.n() as f64;

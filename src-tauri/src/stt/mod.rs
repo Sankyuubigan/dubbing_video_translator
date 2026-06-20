@@ -1,4 +1,4 @@
-use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk, TimeSegment};
+use crate::comm::{PipelineContext, SubtitleChunk, TimeSegment};
 use anyhow::Result;
 use std::path::Path;
 use std::time::Instant;
@@ -55,136 +55,6 @@ fn resolve_model_dir(cfg_dir: &Option<String>, stt_model: &str) -> Option<String
     }
 
     cfg_dir.clone()
-}
-
-/// Разбивает VAD-сегменты по границам спикеров из диаризации.
-/// Возвращает (индекс_исходного_VAD, подсегмент, speaker_id).
-/// Если диаризация не дала результатов — возвращает оригинальные VAD-сегменты.
-fn split_vad_by_speakers<'a>(
-    vad_segments: &'a [TimeSegment],
-    speaker_segments: Option<&'a Vec<SpeakerSegment>>,
-) -> Vec<(usize, TimeSegment, Option<String>)> {
-    let speakers = match speaker_segments {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            return vad_segments.iter().enumerate()
-                .map(|(i, s)| (i, s.clone(), None))
-                .collect();
-        }
-    };
-
-    let mut result = Vec::new();
-    const MIN_SUB_SEGMENT: f64 = 0.5;
-
-    for (vad_idx, vad) in vad_segments.iter().enumerate() {
-        let mut overlapping: Vec<SpeakerSegment> = speakers.iter()
-            .filter(|sp| sp.start_sec < vad.end_sec && sp.end_sec > vad.start_sec)
-            .cloned()
-            .collect();
-        overlapping.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap());
-
-        // Разрешаем перекрытия: делим пересечение пополам между двумя спикерами
-        // Вместо того чтобы обрезать поздний сегмент (что выкидывает его целиком),
-        // отдаём каждому спикеру половину overlapping-региона.
-        for i in 1..overlapping.len() {
-            if overlapping[i].start_sec < overlapping[i - 1].end_sec {
-                let overlap_start = overlapping[i].start_sec;
-                let overlap_end = overlapping[i - 1].end_sec.min(overlapping[i].end_sec);
-                let midpoint = (overlap_start + overlap_end) / 2.0;
-                log::debug!(
-                    "STT: разрешаем перекрытие сегментов спикеров: {:.1}s–{:.1}s [{}] и {:.1}s–{:.1}s [{}], делим по {:.1}s",
-                    overlapping[i - 1].start_sec, overlapping[i - 1].end_sec, overlapping[i - 1].speaker_id,
-                    overlapping[i].start_sec, overlapping[i].end_sec, overlapping[i].speaker_id,
-                    midpoint
-                );
-                overlapping[i - 1].end_sec = midpoint;
-                overlapping[i].start_sec = midpoint;
-            }
-        }
-        overlapping.retain(|s| s.end_sec - s.start_sec >= 0.01);
-
-        if overlapping.is_empty() {
-            result.push((vad_idx, vad.clone(), None));
-            continue;
-        }
-
-        let mut current = vad.start_sec;
-
-        for sp in &overlapping {
-            if sp.start_sec > current + 0.01 {
-                let gap_end = sp.start_sec.min(vad.end_sec);
-                if gap_end - current >= MIN_SUB_SEGMENT {
-                    result.push((vad_idx, TimeSegment {
-                        start_sec: current,
-                        end_sec: gap_end,
-                    }, None));
-                }
-                current = gap_end;
-            }
-
-            let sp_start = current.max(sp.start_sec);
-            let sp_end = sp.end_sec.min(vad.end_sec);
-            if sp_end > sp_start + 0.01 {
-                let dur = sp_end - sp_start;
-                if dur >= MIN_SUB_SEGMENT {
-                    result.push((vad_idx, TimeSegment {
-                        start_sec: sp_start,
-                        end_sec: sp_end,
-                    }, Some(sp.speaker_id.clone())));
-                }
-                current = sp_end;
-            }
-        }
-
-        if vad.end_sec > current + 0.01 {
-            let remaining = vad.end_sec - current;
-            if remaining >= MIN_SUB_SEGMENT {
-                result.push((vad_idx, TimeSegment {
-                    start_sec: current,
-                    end_sec: vad.end_sec,
-                }, None));
-            }
-        }
-    }
-
-    const MAX_CHUNK_LEN: f64 = 6.0;
-    let mut merged: Vec<(usize, TimeSegment, Option<String>)> = Vec::new();
-    for item in result {
-        if let Some(last) = merged.last_mut() {
-            let gap = item.1.start_sec - last.1.end_sec;
-            let same_speaker = last.2.is_some() && last.2 == item.2;
-            let merged_len = item.1.end_sec - last.1.start_sec;
-            if same_speaker && gap <= 0.5 && merged_len <= MAX_CHUNK_LEN {
-                last.1.end_sec = item.1.end_sec;
-                continue;
-            }
-        }
-        merged.push(item);
-    }
-
-    // Заполняем gap-сегменты (None speaker) ближайшим спикером
-    for item in merged.iter_mut() {
-        if item.2.is_some() {
-            continue;
-        }
-        let nearest = speakers.iter()
-            .min_by(|a, b| {
-                let da = (a.start_sec - item.1.start_sec).abs()
-                    .min((a.end_sec - item.1.start_sec).abs());
-                let db = (b.start_sec - item.1.start_sec).abs()
-                    .min((b.end_sec - item.1.start_sec).abs());
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        if let Some(ns) = nearest {
-            log::debug!(
-                "STT: назначаем спикера {} для gap-сегмента {:.1}s–{:.1}s",
-                ns.speaker_id, item.1.start_sec, item.1.end_sec
-            );
-            item.2 = Some(ns.speaker_id.clone());
-        }
-    }
-
-    merged
 }
 
 fn create_qwen3_recognizer(model_dir: &str) -> Result<sherpa_onnx::OfflineRecognizer> {
@@ -281,26 +151,42 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     let stt_model = ctx.config.stt_model.as_deref().unwrap_or("qwen3-asr");
     let model_dir = resolve_model_dir(&ctx.config.sherpa_onnx_dir, stt_model);
     let model_dir = model_dir.as_deref().ok_or_else(|| anyhow::anyhow!(
-        "Не указана директория sherpa-onnx модели (sherpa_onnx_dir)"
+        "Не указана директория sherpa-onnx модели"
     ))?;
 
-    let segments = match ctx.voice_segments.as_ref() {
-        Some(s) => s,
-        None => anyhow::bail!("Нет VAD-сегментов"),
+    // ПРОФЕССИОНАЛЬНЫЙ ПАЙПЛАЙН: Используем сегменты диаризации как источник истины.
+    // Это гарантирует, что в каждом куске аудио только один спикер!
+    let base_segments = if let Some(speakers) = ctx.speaker_segments.as_ref() {
+        speakers.iter().map(|s| TimeSegment {
+            start_sec: s.start_sec,
+            end_sec: s.end_sec,
+        }).collect()
+    } else if let Some(vad_segs) = ctx.voice_segments.as_ref() {
+        vad_segs.clone()
+    } else {
+        anyhow::bail!("Нет ни сегментов диаризации, ни VAD");
     };
 
-    let wav_path_check = std::path::Path::new(wav_path);
-    if !wav_path_check.exists() {
-        anyhow::bail!("STT: WAV файл не найден: {}", wav_path);
+    // ИСПРАВЛЕНИЕ ПРОПУСКОВ РЕЧИ:
+    // Qwen3-ASR "захлебывается" и выдает пустоту на кусках длиннее 15 секунд.
+    // Жестко дробим любые сегменты длиннее 15 секунд.
+    let mut segments = Vec::new();
+    for seg in base_segments {
+        let mut curr_start = seg.start_sec;
+        while curr_start < seg.end_sec {
+            let curr_end = (curr_start + 15.0).min(seg.end_sec);
+            segments.push(TimeSegment {
+                start_sec: curr_start,
+                end_sec: curr_end,
+            });
+            curr_start = curr_end;
+        }
     }
-    let wav_meta = std::fs::metadata(wav_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    log::info!("STT: WAV файл {} ({} bytes)", wav_path, wav_meta);
 
-    log::info!("STT: загружаем {} via sherpa-onnx из {}", stt_model, model_dir);
-
-    let t_load = Instant::now();
+    let wave = sherpa_onnx::Wave::read(wav_path)
+        .ok_or_else(|| anyhow::anyhow!("STT: ошибка чтения WAV: {}", wav_path))?;
+    let sample_rate = wave.sample_rate();
+    let all_samples = wave.samples();
 
     let recognizer = if stt_model == "parakeet-tdt" {
         create_parakeet_recognizer(model_dir)?
@@ -308,202 +194,108 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         create_qwen3_recognizer(model_dir)?
     };
 
-    log::info!("STT: модель загружена за {:.1}s", t_load.elapsed().as_secs_f64());
-
-    let wave = sherpa_onnx::Wave::read(wav_path)
-        .ok_or_else(|| anyhow::anyhow!("STT: ошибка чтения WAV: {}", wav_path))?;
-    let sample_rate = wave.sample_rate();
-    let all_samples = wave.samples();
-    log::info!("STT: аудио sample_rate={}, len={} samples ({:.1}s)",
-        sample_rate, all_samples.len(),
-        all_samples.len() as f64 / sample_rate as f64);
-
     let t_stt = Instant::now();
-
-    let speaker_segments = ctx.speaker_segments.as_ref();
-    let sub_segments = split_vad_by_speakers(segments, speaker_segments);
-    log::info!("STT: {} VAD-сегментов разбито на {} подсегментов по границам спикеров",
-        segments.len(), sub_segments.len());
-
-    let mut streams: Vec<sherpa_onnx::OfflineStream> = Vec::new();
-    let mut segment_info: Vec<(usize, f64, f64, Option<String>)> = Vec::new();
-
-    for (idx, seg, speaker_id) in &sub_segments {
-        log::debug!("STT: сегмент {}: {:.1}с–{:.1}с{}",
-            idx, seg.start_sec, seg.end_sec,
-            speaker_id.as_ref().map_or(String::new(), |s| format!(" [{}]", s)));
-
-        let start_sample = (seg.start_sec * sample_rate as f64) as usize;
-        let end_sample = (seg.end_sec * sample_rate as f64).min(all_samples.len() as f64) as usize;
-
-        if start_sample >= end_sample || end_sample > all_samples.len() {
-            log::warn!("STT: подсегмент {} пустой, пропускаем", idx);
-            continue;
-        }
-
-        let seg_samples = &all_samples[start_sample..end_sample];
-        if seg_samples.is_empty() {
-            log::warn!("STT: подсегмент {} пустой, пропускаем", idx);
-            continue;
-        }
-
-        let stream = recognizer.create_stream();
-
-        if stt_model == "qwen3-asr" {
-            stream.set_option("language", "English");
-        }
-
-        stream.accept_waveform(sample_rate, seg_samples);
-        streams.push(stream);
-        segment_info.push((*idx, seg.start_sec, seg.end_sec, speaker_id.clone()));
-    }
-
-    // Декодируем пачками, а не всё сразу — иначе GPU OOM на длинных видео
-    const BATCH_SIZE: usize = 32;
-    if !streams.is_empty() {
-        let total = streams.len();
-        let n_batches = (total + BATCH_SIZE - 1) / BATCH_SIZE;
-        let log_step = (n_batches / 10).max(1);
-        for (batch_idx, batch) in streams.chunks(BATCH_SIZE).enumerate() {
-            if batch_idx == 0 || batch_idx == n_batches - 1 || batch_idx % log_step == 0 {
-                let pct = (batch_idx + 1) * 100 / n_batches;
-                log::info!("STT: декодировано {}/{} пачек ({}%)",
-                    batch_idx + 1, n_batches, pct);
-            }
-            let stream_refs: Vec<&sherpa_onnx::OfflineStream> = batch.iter().collect();
-            recognizer.decode_multiple_streams(&stream_refs);
-        }
-    }
-
     let mut subtitle_chunks: Vec<SubtitleChunk> = Vec::new();
-    for (offset, (orig_idx, start_sec, end_sec, speaker_id)) in segment_info.iter().enumerate() {
-        let text = match streams[offset].get_result() {
-            Some(r) => {
-                log::debug!("STT: сырой результат сегмента {}: {:?}", orig_idx, r.text);
-                r.text
-            }
-            None => {
-                log::error!("STT: пустой результат сегмента {}", orig_idx);
-                continue;
-            }
-        };
+    const BATCH_SIZE: usize = 16;
 
-        let clean = if stt_model == "qwen3-asr" {
-            parse_qwen3asr(&text)
-        } else {
-            parse_text(&text)
-        };
+    let n_batches = (segments.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+    let log_step = (n_batches / 10).max(1);
 
-        if clean.is_empty() {
-            log::warn!("STT: сегмент {} пустой (распознавание не дало текста)", orig_idx);
-            merge_empty_segment(&mut subtitle_chunks, *start_sec, *end_sec, *orig_idx);
-            continue;
+    for (batch_idx, batch_segments) in segments.chunks(BATCH_SIZE).enumerate() {
+        if batch_idx == 0 || batch_idx == n_batches - 1 || batch_idx % log_step == 0 {
+            let pct = (batch_idx + 1) * 100 / n_batches;
+            log::info!("STT: обработка {}/{} пачек ({}%)", batch_idx + 1, n_batches, pct);
         }
 
-        log::debug!("STT: сегмент {} распознан: {}", orig_idx, clean);
-        subtitle_chunks.push(SubtitleChunk {
-            start_sec: *start_sec,
-            end_sec: *end_sec,
-            text: clean,
-            speaker_id: speaker_id.clone(),
-            word_timestamps: None,
-        });
+        let mut streams = Vec::new();
+        let mut valid_segments = Vec::new();
+
+        for seg in batch_segments {
+            let start_sample = (seg.start_sec * sample_rate as f64) as usize;
+            let end_sample = (seg.end_sec * sample_rate as f64).min(all_samples.len() as f64) as usize;
+
+            if start_sample >= end_sample { continue; }
+            let seg_samples = &all_samples[start_sample..end_sample];
+            if seg_samples.is_empty() { continue; }
+
+            let stream = recognizer.create_stream();
+            if stt_model == "qwen3-asr" { stream.set_option("language", "English"); }
+            stream.accept_waveform(sample_rate, seg_samples);
+
+            streams.push(stream);
+            valid_segments.push(seg);
+        }
+
+        if streams.is_empty() { continue; }
+
+        let stream_refs: Vec<&sherpa_onnx::OfflineStream> = streams.iter().collect();
+        recognizer.decode_multiple_streams(&stream_refs);
+
+        for (offset, seg) in valid_segments.into_iter().enumerate() {
+            if let Some(r) = streams[offset].get_result() {
+                let clean = if stt_model == "qwen3-asr" { parse_qwen3asr(&r.text) } else { parse_text(&r.text) };
+
+                if !clean.is_empty() {
+                    subtitle_chunks.push(SubtitleChunk {
+                        start_sec: seg.start_sec,
+                        end_sec: seg.end_sec,
+                        text: clean,
+                        speaker_id: None,
+                        word_timestamps: None,
+                    });
+                }
+            }
+        }
     }
 
-    fill_placeholder_gaps(&mut subtitle_chunks);
-    subtitle_chunks = split_long_chunks(subtitle_chunks);
+    let mut final_chunks = split_long_chunks(subtitle_chunks);
 
-    log::info!("STT: распознано {} из {} сегментов за {:.1}s",
-        subtitle_chunks.len(), segments.len(), t_stt.elapsed().as_secs_f64());
+    if let Some(speakers) = ctx.speaker_segments.as_ref() {
+        for chunk in final_chunks.iter_mut() {
+            if let Some(speaker) = crate::comm::find_speaker_for_chunk(chunk, speakers) {
+                chunk.speaker_id = Some(speaker.to_string());
+            }
+        }
+    }
 
-    if subtitle_chunks.is_empty() {
-        log::error!("STT: ни один сегмент не распознан, прерываем pipeline");
-        anyhow::bail!("STT: модель не распознала речь ни в одном сегменте. Проверьте аудио или модель.");
+    log::info!("STT: распознано {} чанков за {:.1}s", final_chunks.len(), t_stt.elapsed().as_secs_f64());
+
+    if final_chunks.is_empty() {
+        anyhow::bail!("STT: модель не распознала речь ни в одном сегменте.");
     }
 
     Ok(PipelineContext {
-        subtitle_chunks: Some(subtitle_chunks),
+        subtitle_chunks: Some(final_chunks),
         ..ctx
     })
 }
 
-fn merge_empty_segment(chunks: &mut Vec<SubtitleChunk>, start_sec: f64, end_sec: f64, idx: usize) {
-    const MERGE_MAX_GAP: f64 = 2.0;
-
-    if let Some(last) = chunks.last_mut() {
-        let gap = start_sec - last.end_sec;
-        if gap <= MERGE_MAX_GAP {
-            log::debug!(
-                "STT: мержим пустой сегмент {} ({:.1}s–{:.1}s) с предыдущим чанком (расширяем до {:.1}s)",
-                idx, start_sec, end_sec, end_sec
-            );
-            last.end_sec = end_sec;
-            return;
-        }
-    }
-
-    chunks.push(SubtitleChunk {
-        start_sec,
-        end_sec,
-        text: String::new(),
-        speaker_id: None,
-        word_timestamps: None,
-    });
-    log::debug!(
-        "STT: пустой сегмент {} ({:.1}s–{:.1}s) добавлен как плейсхолдер для заполнения",
-        idx, start_sec, end_sec
-    );
-}
-
-fn fill_placeholder_gaps(chunks: &mut Vec<SubtitleChunk>) {
-    let mut i = 0;
-    while i < chunks.len() {
-        if !chunks[i].text.is_empty() || i == 0 {
-            i += 1;
-            continue;
-        }
-        if i > 0 {
-            chunks[i - 1].end_sec = chunks[i].end_sec;
-            log::debug!("STT: заполняем плейсхолдер {:.1}s–{:.1}s — расширяем предыдущий чанк",
-                chunks[i].start_sec, chunks[i].end_sec);
-        }
-        chunks.remove(i);
-    }
-}
-
-const MAX_TEXT_CHARS: usize = 120;
-
-/// Разбивает длинные субтитры на несколько более коротких по границам предложений.
-/// Время распределяется пропорционально длине текста.
 fn split_long_chunks(chunks: Vec<SubtitleChunk>) -> Vec<SubtitleChunk> {
     let mut result = Vec::new();
     for chunk in chunks {
-        if chunk.text.len() <= MAX_TEXT_CHARS || chunk.text.is_empty() {
-            result.push(chunk);
-            continue;
-        }
+        let text = chunk.text.trim();
+        if text.is_empty() { continue; }
 
-        let parts = split_text_for_display(&chunk.text, MAX_TEXT_CHARS);
+        let parts = split_text_for_display(text, 80);
+        if parts.is_empty() { continue; }
+
+        let total_chars: usize = parts.iter().map(|p| p.chars().count()).sum();
         let total_duration = chunk.end_sec - chunk.start_sec;
-        let total_chars = chunk.text.len() as f64;
         let mut current_start = chunk.start_sec;
 
         for part in parts {
-            let part_chars = part.len() as f64;
-            let part_duration = (part_chars / total_chars) * total_duration;
+            let part_duration = if total_chars > 0 {
+                (part.chars().count() as f64 / total_chars as f64) * total_duration
+            } else {
+                total_duration
+            };
             let current_end = (current_start + part_duration).min(chunk.end_sec);
-
-            log::debug!(
-                "STT: разбиваем длинный чанк ({:.1}s–{:.1}s, {} символов) на: {:.1}s–{:.1}s [{}]",
-                chunk.start_sec, chunk.end_sec, chunk.text.len(),
-                current_start, current_end, part,
-            );
 
             result.push(SubtitleChunk {
                 start_sec: current_start,
                 end_sec: current_end,
                 text: part,
-                speaker_id: chunk.speaker_id.clone(),
+                speaker_id: None,
                 word_timestamps: None,
             });
             current_start = current_end;
@@ -699,6 +491,7 @@ mod tests {
         let result = split_long_chunks(chunks);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].text, "Hello world.");
+        assert!(result[0].speaker_id.is_none());
     }
 
     #[test]
@@ -713,9 +506,11 @@ mod tests {
         }];
         let result = split_long_chunks(chunks);
         assert!(result.len() >= 2);
-        // Check times are distributed
         assert!(result[0].start_sec < result[0].end_sec);
         assert!(result[1].start_sec >= result[0].end_sec);
+        for chunk in &result {
+            assert!(chunk.speaker_id.is_none());
+        }
     }
 
     #[test]
@@ -728,44 +523,31 @@ mod tests {
             word_timestamps: None,
         }];
         let result = split_long_chunks(chunks);
-        assert_eq!(result.len(), 1);
+        assert!(result.is_empty());
     }
 }
 
-/// Парсит вывод Qwen3-ASR.
-/// Модель выдаёт формат: `language {lang}<asr_text>{text}</asr_text>`
-/// Иногда без тегов, просто `language Dutch.` — фильтруем такое.
 fn parse_qwen3asr(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-
+    if text.is_empty() { return String::new(); }
     if let Some(start) = text.find("<asr_text>") {
         let after = &text[start + "<asr_text>".len()..];
         if let Some(end) = after.find("</asr_text>") {
-            let content = after[..end].trim().to_string();
-            if content.is_empty() {
-                log::warn!("STT: Qwen3-ASR не обнаружил речи в аудио");
-            }
-            return content;
+            return after[..end].trim().to_string();
         }
-        let trimmed = after.trim().to_string();
-        if trimmed.is_empty() {
-            log::warn!("STT: Qwen3-ASR не обнаружил речи в аудио");
-        }
-        return trimmed;
+        return after.trim().to_string();
     }
 
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
+    let mut trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
 
-    // Qwen3-ASR иногда выдаёт только языковой тег без <asr_text>
-    // например "language Dutch." или " language English"
-    if trimmed.to_lowercase().contains("language") {
-        log::warn!("STT: Qwen3-ASR не обнаружил речи в аудио (языковой тег: {:?})", trimmed);
-        return String::new();
+    // Спасаем текст: если модель забыла теги, но написала "language English [текст]"
+    if lower.starts_with("language ") {
+        if let Some(space_idx) = trimmed[9..].find(' ') {
+            trimmed = trimmed[9 + space_idx..].trim();
+            trimmed = trimmed.trim_start_matches(|c: char| !c.is_alphabetic());
+        } else {
+            return String::new(); // Это просто тег языка без самого текста
+        }
     }
 
     trimmed.to_string()

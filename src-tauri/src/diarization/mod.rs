@@ -471,8 +471,8 @@ fn merge_interleaved_speakers(segments: &[SpeakerSegment]) -> Vec<SpeakerSegment
 /// 4. Гарантируем минимум 2 спикера, если их было >= 2 до слияния
 /// 5. Перенумеровываем спикеров в порядке появления (Speaker_1, Speaker_2, ...)
 fn postprocess_segments(segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
-    const MIN_DURATION: f64 = 0.5;
-    const MERGE_GAP: f64 = 1.0;
+    const MIN_DURATION: f64 = 0.2;
+    const MERGE_GAP: f64 = 0.3;
     const MINOR_SPEAKER_RATIO: f64 = 0.05;
 
     // Шаг 1: фильтруем слишком короткие сегменты
@@ -696,8 +696,8 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
         // min_duration_on: минимальная длительность речевого сегмента (сек)
         // min_duration_off: минимальная пауза между спикерами для смены (сек)
         //   Было 1.0 — слишком длинная пауза, проглатывались быстрые реплики собеседника
-        min_duration_on: 0.3,
-        min_duration_off: 0.5,
+        min_duration_on: 0.2,
+        min_duration_off: 0.2,
     };
 
     let sd = OfflineSpeakerDiarization::create(&config)
