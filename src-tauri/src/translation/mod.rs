@@ -35,7 +35,9 @@ fn build_prompt(
         (e.g. 'сто семьдесят сантиметров' instead of '170 см', 'тридцать два' instead of '32'). TTS engine cannot read digits.\n\
         4. METRIC: Convert imperial units to metric before spelling them out.\n\
         5. GENDER: Current speaker is [SPEAKER_GENDER]. Ensure Russian verbs/adjectives match this gender perfectly.\n\
-        6. NO CENSORSHIP: Preserve all slang and profanity accurately.\n\n\
+        6. NO CENSORSHIP: Preserve all slang and profanity accurately.\n\
+        7. OUTPUT FORMAT: Output the translation ONLY ONCE. Do NOT repeat or revise the answer. \
+        Do NOT add prefixes like \"Translation:\" or quotation marks.\n\n\
         First, use <|channel>thought to analyze the context, fix errors, and plan a concise translation. Then, output ONLY the final spoken Russian text in the normal channel.<turn|>\n\
         <|turn>user\n",
     );
@@ -120,37 +122,77 @@ fn merge_short_chunks(chunks: &[SubtitleChunk]) -> Vec<SubtitleChunk> {
 fn clean_output(output: &str) -> String {
     // Extract the final answer from the CoT format: <|channel>thought...<channel|>FINAL_ANSWER
     // Handle edge cases: stray <|channel> after <channel|>, or answer before <channel|>
+    // If multiple <channel|> blocks exist and the last one has insufficient Cyrillic content
+    // (e.g., model ran out of tokens during CoT), fall back to the previous block.
+    // Each block is bounded by the next <channel|> marker (or end of string) to avoid
+    // contamination from later blocks' CoT content.
     let output = {
-        if let Some(pos) = output.rfind("<channel|>") {
-            let after = output[pos + "<channel|>".len()..].trim_start();
-            // Strip any leading <|channel> or <|...> tags that follow <channel|>
+        let positions: Vec<usize> = output.match_indices("<channel|>")
+            .map(|(pos, _)| pos)
+            .collect();
+
+        let mut selected: Option<&str> = None;
+        let mut last_valid: Option<&str> = None;
+
+        for i in (0..positions.len()).rev() {
+            let start = positions[i] + "<channel|>".len();
+            let end = if i + 1 < positions.len() {
+                positions[i + 1]
+            } else {
+                output.len()
+            };
+            let block_text = &output[start..end];
+
+            let after = block_text.trim_start();
             let cleaned = if after.starts_with("<|") {
-                if let Some(end) = after.find('>') {
-                    after[end + 1..].trim_start()
+                if let Some(end_tag) = after.find('>') {
+                    after[end_tag + 1..].trim_start()
                 } else {
                     after
                 }
             } else {
                 after
             };
-            // If after cleaning we get meaningful content, use it
-            if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case("thought") {
-                cleaned
-            } else {
-                // Fallback: content between <|channel>thought and <channel|>
-                let before = &output[..pos];
-                if let Some(tp) = before.find("<|channel>thought") {
-                    &before[tp + "<|channel>thought".len()..]
-                } else if let Some(tp) = before.find("<|channel>") {
-                    &before[tp + "<|channel>".len()..]
+
+            if cleaned.is_empty() || cleaned.trim().eq_ignore_ascii_case("thought") {
+                log::info!("CLEANOUTPUT_DEBUG: block[{}] skipped (empty/thought)", i);
+                continue;
+            }
+
+            let cyrillic_count = cleaned.chars()
+                .filter(|c| ('А'..='я').contains(c) || *c == 'Ё' || *c == 'ё')
+                .count();
+            let total_alpha = cleaned.chars().filter(|c| c.is_alphabetic()).count();
+            // Accept block only if Cyrillic makes up >= 25% of alphabetic chars.
+            // Using ratio avoids selecting long English CoT blocks that happen to
+            // start with a few Cyrillic words (e.g., "Пять футов семь. (Wait, I must...").
+            let has_cyrillic = total_alpha > 0 && cyrillic_count as f64 / total_alpha as f64 >= 0.25;
+
+            log::info!(
+                "CLEANOUTPUT_DEBUG: block[{}] cyr={} alpha={} ratio={:.2} has_cyrillic={} cleaned='{}'",
+                i, cyrillic_count, total_alpha,
+                if total_alpha > 0 { cyrillic_count as f64 / total_alpha as f64 } else { 0.0 },
+                has_cyrillic, cleaned.chars().take(60).collect::<String>()
+            );
+
+            if has_cyrillic {
+                selected = Some(cleaned);
+                break;
+            }
+            if last_valid.is_none() {
+                last_valid = Some(cleaned);
+            }
+        }
+
+        match selected.or(last_valid) {
+            Some(text) => text,
+            None => {
+                if let Some(pos) = output.find("<|channel>") {
+                    &output[pos + "<|channel>".len()..]
                 } else {
-                    before
+                    output
                 }
             }
-        } else if let Some(pos) = output.find("<|channel>") {
-            &output[pos + "<|channel>".len()..]
-        } else {
-            output
         }
     };
 
@@ -202,13 +244,28 @@ fn clean_output(output: &str) -> String {
         }
     };
     // If multiple lines remain, model likely generated multiple translation candidates;
-    // keep only the last (most refined) line
+    // keep only the last (most refined) line, but prefer lines without known prefixes
     let output = output.trim();
     let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
     let output = if lines.len() > 1 {
-        lines.last().unwrap().trim()
+        let known_prefixes = ["Russian: ", "Russian : ", "Translation: ", "RU: ", "Перевод: "];
+        // Iterate in reverse, prefer last line WITHOUT a known prefix
+        lines.iter()
+            .rev()
+            .find(|l| !known_prefixes.iter().any(|p| l.trim().starts_with(p)))
+            .map(|l| l.trim())
+            .unwrap_or_else(|| lines.last().unwrap().trim())
     } else {
         output
+    };
+    // Strip known prefixes from final result (handles single-line + edge cases)
+    let output = {
+        let known_prefixes = ["Russian: ", "Russian : ", "Translation: ", "RU: ", "Перевод: "];
+        if let Some(rest) = known_prefixes.iter().find_map(|p| output.strip_prefix(p)) {
+            rest.trim()
+        } else {
+            output
+        }
     };
     // Strip bold/italic markers (**) from markdown formatting that model sometimes adds
     let output = output.trim_start_matches(|c: char| c == '*' || c == '_');
@@ -528,6 +585,10 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         );
         let output = clean_output(&raw);
 
+        if chunk.text.trim() == "Five seven." {
+            log::info!("CLEANOUTPUT_DEBUG: 'Five seven.' raw_len={}, output='{}'", raw.len(), output);
+        }
+
         let translated = if output.is_empty() {
             log::warn!(
                 "Перевод: пустой вывод для '{}' ({} токенов)",
@@ -822,5 +883,45 @@ mod tests {
     fn test_clean_output_strips_stray_channel_fallback() {
         let out = clean_output("Reasoning text\n<channel|><|channel>");
         assert_eq!(out, "Reasoning text", "fallback to content before <channel|> when no answer after it");
+    }
+
+    #[test]
+    fn test_clean_output_multiline_prefers_without_prefix() {
+        let out = clean_output(
+            "Свет и камера уже стоят, всё готово к работе.\n\
+             Translation: Свет и камера уже стоят, всё готово к работе."
+        );
+        assert_eq!(out, "Свет и камера уже стоят, всё готово к работе.",
+            "multiline with prefixed last line: should pick clean first line");
+    }
+
+    #[test]
+    fn test_clean_output_multiline_both_prefixed_fallback() {
+        // When ALL lines have known prefixes, fall back to last line
+        let out = clean_output(
+            "Russian: Первая строка\n\
+             Translation: Вторая строка"
+        );
+        assert_eq!(out, "Вторая строка",
+            "all prefixed: should pick last line as fallback");
+    }
+
+    #[test]
+    fn test_clean_output_single_line_known_prefix() {
+        // Single-line output with prefix should still be stripped
+        let out = clean_output("Translation: Привет мир");
+        assert_eq!(out, "Привет мир");
+    }
+
+    #[test]
+    fn test_clean_output_multiline_translation_quotes() {
+        // Simulates the actual bug scenario from the logs
+        let out = clean_output(
+            "Свет и камера уже стоят, всё готово к работе. Хорошо?\"\n\
+             Translation: \"Свет и камера уже стоят, всё готово к работе. Хорошо?\"\n\n\
+             Is there any number? No."
+        );
+        assert_eq!(out, "Свет и камера уже стоят, всё готово к работе. Хорошо?\"",
+            "multiline with Translation: prefix + trailing CoT: should pick clean first line");
     }
 }

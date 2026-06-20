@@ -418,8 +418,8 @@ pub fn run() {
                             stt_model: cfg.stt_model.clone(),
                             diarization_threshold: cfg.diarization_threshold,
                             diarization_num_speakers: cfg.diarization_num_speakers,
-                            enable_dubbing: false,
-                            mix_volume: cfg.mix_volume,
+            enable_dubbing: false,
+            mix_volume: cfg.mix_volume,
                         };
                         let ctx = comm::PipelineContext::new(pcfg);
                         log::info!("AUTO: running pipeline...");
@@ -517,6 +517,7 @@ mod tests {
             diarization_threshold: cfg.diarization_threshold,
             diarization_num_speakers: cfg.diarization_num_speakers,
             enable_dubbing: false,
+            mix_volume: 1.0,
         };
         let ctx = PipelineContext::new(pipeline_cfg);
 
