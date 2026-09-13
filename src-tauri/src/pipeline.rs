@@ -48,6 +48,9 @@ pub fn run(ctx: PipelineContext) -> Result<PipelineContext> {
     let ctx = timed_stage!("translate", 70.0, ctx, crate::translation::translate)
         .map_err(|e| { log::error!("[pipeline] translation: {:#}", e); e })?;
 
+    let ctx = timed_stage!("verify", 75.0, ctx, crate::verification::verify)
+        .map_err(|e| { log::error!("[pipeline] verification: {:#}", e); e })?;
+
     let ctx = timed_stage!("tts", 80.0, ctx, crate::tts::dub)
         .map_err(|e| { log::error!("[pipeline] tts: {:#}", e); e })?;
 

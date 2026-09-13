@@ -3,7 +3,6 @@ use anyhow::Result;
 use encoding_rs::UTF_8;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
@@ -13,7 +12,7 @@ use std::path::Path;
 
 const MAX_N_CTX: u32 = 8192;
 const MAX_CONTEXT_CHUNKS: usize = 8;
-const SAMPLING_TEMP: f32 = 1.0;
+const SAMPLING_TEMP: f32 = 0.6;
 const SAMPLING_TOP_K: i32 = 64;
 const SAMPLING_TOP_P: f32 = 0.95;
 const SAMPLING_REP_PENALTY: f32 = 1.05;
@@ -119,22 +118,22 @@ fn merge_short_chunks(chunks: &[SubtitleChunk]) -> Vec<SubtitleChunk> {
     merged
 }
 
-fn clean_output(output: &str) -> String {
-    // Extract the final answer from the CoT format: <|channel>thought...<channel|>FINAL_ANSWER
-    // Handle edge cases: stray <|channel> after <channel|>, or answer before <channel|>
-    // If multiple <channel|> blocks exist and the last one has insufficient Cyrillic content
-    // (e.g., model ran out of tokens during CoT), fall back to the previous block.
-    // Each block is bounded by the next <channel|> marker (or end of string) to avoid
-    // contamination from later blocks' CoT content.
+/// Очистка вывода модели (общая для основного перевода и строгих ретраев
+/// верификации): извлекает ответ из CoT-цикла `<|channel>thought...<channel|>ANSWER`.
+pub(crate) fn clean_output(output: &str) -> String {
+    // Извлекаем ответ из CoT-формата: <|channel>thought...<channel|>ANSWER
+    // Если закрывающих <channel|> несколько (модель ушла в «режим редактора»:
+    // первый ответ корректен, дальше идёт мусор), берём ПЕРВЫЙ блок с
+    // достаточным содержанием кириллицы. Второй и последующие — хвост-правки.
     let output = {
         let positions: Vec<usize> = output.match_indices("<channel|>")
             .map(|(pos, _)| pos)
             .collect();
 
         let mut selected: Option<&str> = None;
-        let mut last_valid: Option<&str> = None;
+        let mut last_touched: Option<&str> = None;
 
-        for i in (0..positions.len()).rev() {
+        for i in 0..positions.len() {
             let start = positions[i] + "<channel|>".len();
             let end = if i + 1 < positions.len() {
                 positions[i + 1]
@@ -163,9 +162,6 @@ fn clean_output(output: &str) -> String {
                 .filter(|c| ('А'..='я').contains(c) || *c == 'Ё' || *c == 'ё')
                 .count();
             let total_alpha = cleaned.chars().filter(|c| c.is_alphabetic()).count();
-            // Accept block only if Cyrillic makes up >= 25% of alphabetic chars.
-            // Using ratio avoids selecting long English CoT blocks that happen to
-            // start with a few Cyrillic words (e.g., "Пять футов семь. (Wait, I must...").
             let has_cyrillic = total_alpha > 0 && cyrillic_count as f64 / total_alpha as f64 >= 0.25;
 
             log::info!(
@@ -179,12 +175,10 @@ fn clean_output(output: &str) -> String {
                 selected = Some(cleaned);
                 break;
             }
-            if last_valid.is_none() {
-                last_valid = Some(cleaned);
-            }
+            last_touched = Some(cleaned);
         }
 
-        match selected.or(last_valid) {
+        match selected.or(last_touched) {
             Some(text) => text,
             None => {
                 if let Some(pos) = output.find("<|channel>") {
@@ -244,17 +238,16 @@ fn clean_output(output: &str) -> String {
         }
     };
     // If multiple lines remain, model likely generated multiple translation candidates;
-    // keep only the last (most refined) line, but prefer lines without known prefixes
+    // keep the FIRST line (most direct answer), but prefer lines without known prefixes
     let output = output.trim();
     let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
     let output = if lines.len() > 1 {
         let known_prefixes = ["Russian: ", "Russian : ", "Translation: ", "RU: ", "Перевод: "];
-        // Iterate in reverse, prefer last line WITHOUT a known prefix
+        // Iterate forward, prefer first line WITHOUT a known prefix
         lines.iter()
-            .rev()
             .find(|l| !known_prefixes.iter().any(|p| l.trim().starts_with(p)))
             .map(|l| l.trim())
-            .unwrap_or_else(|| lines.last().unwrap().trim())
+            .unwrap_or_else(|| lines.first().unwrap().trim())
     } else {
         output
     };
@@ -338,52 +331,7 @@ fn generate<'a>(
     eos: LlamaToken,
     max_new: usize,
 ) -> Result<Vec<LlamaToken>> {
-    let tokens = model.str_to_token(prompt, AddBos::Always)?;
-
-    let mut batch_llm = LlamaBatch::new(tokens.len(), 1);
-    for (i, t) in tokens.iter().enumerate() {
-        batch_llm.add(*t, i as i32, &[0], i == tokens.len() - 1)?;
-    }
-    ctx.decode(&mut batch_llm)?;
-
-    let mut output_toks = Vec::new();
-    let mut ctx_pos = batch_llm.n_tokens() as i32;
-
-    for _ in 0..max_new {
-        let mut cur_p = ctx.token_data_array();
-        sampler.apply(&mut cur_p);
-
-        let token = match cur_p.selected_token() {
-            Some(t) => t,
-            None => break,
-        };
-
-        if token == eos {
-            break;
-        }
-
-        sampler.accept(token);
-        output_toks.push(token);
-
-        // Early stopping: if model tries to open a new turn or channel, stop
-        let current_text = decode_tokens(model, &output_toks);
-        if current_text.contains("<turn|>") || current_text.contains("<|channel>") {
-            break;
-        }
-
-        let mut nb = LlamaBatch::new(1, 1);
-        if let Err(e) = nb.add(token, ctx_pos, &[0], true) {
-            log::warn!("Перевод: ошибка batch.add: {:#}", e);
-            break;
-        }
-        if let Err(e) = ctx.decode(&mut nb) {
-            log::warn!("Перевод: ошибка decode: {:#}", e);
-            break;
-        }
-        ctx_pos += 1;
-    }
-
-    Ok(output_toks)
+    crate::llm::generate_tokens(model, ctx, sampler, prompt, eos, max_new, true)
 }
 
 fn decode_tokens(model: &LlamaModel, tokens: &[LlamaToken]) -> String {
@@ -882,7 +830,7 @@ mod tests {
     #[test]
     fn test_clean_output_strips_stray_channel_fallback() {
         let out = clean_output("Reasoning text\n<channel|><|channel>");
-        assert_eq!(out, "Reasoning text", "fallback to content before <channel|> when no answer after it");
+        assert_eq!(out, "", "no Cyrillic in any block → empty (CoT only, no answer)");
     }
 
     #[test]
@@ -897,13 +845,13 @@ mod tests {
 
     #[test]
     fn test_clean_output_multiline_both_prefixed_fallback() {
-        // When ALL lines have known prefixes, fall back to last line
+        // When ALL lines have known prefixes, fall back to first line
         let out = clean_output(
             "Russian: Первая строка\n\
              Translation: Вторая строка"
         );
-        assert_eq!(out, "Вторая строка",
-            "all prefixed: should pick last line as fallback");
+        assert_eq!(out, "Первая строка",
+            "all prefixed: should pick first line as fallback");
     }
 
     #[test]

@@ -243,7 +243,7 @@ pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
 
     for (idx, chunk) in translated.iter().enumerate() {
         let text = chunk.text.trim();
-        if text.is_empty() {
+        if text.is_empty() || text == crate::comm::SKIP_MARKER {
             continue;
         }
         let speaker_id = chunk

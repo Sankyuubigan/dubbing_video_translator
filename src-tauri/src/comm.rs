@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Маркер мусорного перевода: озвучка его не зачитывает, но в субтитрах
+/// видно, что здесь пропуск. Ставят верификация/перевод.
+pub const SKIP_MARKER: &str = "(-)";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeSegment {
     pub start_sec: f64,

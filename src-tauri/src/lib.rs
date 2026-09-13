@@ -4,12 +4,14 @@ pub mod config;
 mod diarization;
 mod download;
 mod ffmpeg;
+mod llm;
 mod output;
 pub mod pipeline;
 mod stt;
 mod translation;
 mod tts;
 mod vad;
+mod verification;
 
 use comm::{PipelineConfig, PipelineContext, ProgressUpdate};
 use llama_cpp_2::llama_backend::LlamaBackend;
