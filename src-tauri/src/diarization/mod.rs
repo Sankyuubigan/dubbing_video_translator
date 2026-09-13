@@ -1,5 +1,6 @@
 use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk};
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use sherpa_onnx::{
     FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
@@ -7,6 +8,7 @@ use sherpa_onnx::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 const MODELS_SUBDIR: &str = "models\\diarization";
 
@@ -225,18 +227,6 @@ fn detect_speaker_genders(
     result
 }
 
-/// Минимальное расстояние между двумя сегментами (0 если пересекаются).
-fn segment_distance(a: &SpeakerSegment, b: &SpeakerSegment) -> f64 {
-    if a.start_sec < b.end_sec && a.end_sec > b.start_sec {
-        return 0.0;
-    }
-    if a.end_sec <= b.start_sec {
-        b.start_sec - a.end_sec
-    } else {
-        a.start_sec - b.end_sec
-    }
-}
-
 /// Пост-обработка сегментов диаризации — слияние спикеров-дубликатов.
 ///
 /// Стратегия (в порядке приоритета):
@@ -314,7 +304,9 @@ fn merge_interleaved_speakers(segments: &[SpeakerSegment]) -> Vec<SpeakerSegment
             });
 
             let can_dur = duration_map.get(candidate).unwrap_or(&0.0);
-            if !has_overlap {
+            // Склеиваем не-доминантного только если он совсем крошечный (<5% времени).
+            // Реальных редких спикеров не трогаем — иначе они пропадают из результата.
+            if !has_overlap && *can_dur < total_duration * 0.05 {
                 log::info!(
                     "Diarization: merging {} ({:.1}s, {:.0}%) into {} (no overlap) — same person",
                     candidate, can_dur, can_dur / total_duration * 100.0,
@@ -346,103 +338,8 @@ fn merge_interleaved_speakers(segments: &[SpeakerSegment]) -> Vec<SpeakerSegment
         remaining_speakers.len(),
         remaining_speakers
     );
-
-    // Шаг 2: если осталось > 2 спикеров — склеиваем минорного (<15%)
-    // с ближайшим мажорным спикером по времени (не только с доминантным)
-    if remaining_speakers.len() >= 3 {
-        let mut dur_after: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        for seg in &result {
-            *dur_after.entry(seg.speaker_id.clone()).or_insert(0.0) += seg.end_sec - seg.start_sec;
-        }
-        let mut sorted_after: Vec<String> = remaining_speakers.clone();
-        sorted_after.sort_by(|a, b| {
-            let da = dur_after.get(a).copied().unwrap_or(0.0);
-            let db = dur_after.get(b).copied().unwrap_or(0.0);
-            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Собираем мажорных спикеров (>15% времени)
-        let major_speakers: Vec<&String> = sorted_after.iter()
-            .filter(|s| dur_after.get(*s).copied().unwrap_or(0.0) > total_duration * 0.15)
-            .collect();
-        // Если все спикеры минорные — используем доминантного как fallback
-        let major_speakers: Vec<&String> = if major_speakers.is_empty() {
-            vec![&sorted_after[0]]
-        } else {
-            major_speakers
-        };
-
-        for minor in &sorted_after[1..] {
-            let minor_dur = dur_after.get(minor).copied().unwrap_or(0.0);
-            if minor_dur > total_duration * 0.15 {
-                continue;
-            }
-
-            let minor_segs = match by_speaker_after.get(minor) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // Проверяем пересечение со ВСЕМИ мажорными спикерами
-            let mut overlaps_with: Option<&String> = None;
-            for &major in &major_speakers {
-                let major_segs = match by_speaker_after.get(major) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let has_overlap = minor_segs.iter().any(|ms| {
-                    major_segs.iter().any(|ds| {
-                        ms.start_sec < ds.end_sec && ms.end_sec > ds.start_sec
-                    })
-                });
-                if has_overlap {
-                    overlaps_with = Some(major);
-                    break;
-                }
-            }
-
-            match overlaps_with {
-                Some(major) => {
-                    log::debug!("Diarization: шаг 2 — {} overlaps with {}, не склеиваем", minor, major);
-                }
-                None => {
-                    // Не пересекается ни с кем — находим ближайшего мажорного спикера
-                    let nearest: &String = major_speakers.iter()
-                        .min_by(|&a, &b| {
-                            let a_segs = by_speaker_after.get(a.as_str()).unwrap();
-                            let b_segs = by_speaker_after.get(b.as_str()).unwrap();
-                            let dist_a = minor_segs.iter()
-                                .map(|ms| a_segs.iter()
-                                    .map(|a_seg| segment_distance(ms, a_seg))
-                                    .min_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
-                                    .unwrap_or(f64::MAX))
-                                .min_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
-                                .unwrap_or(f64::MAX);
-                            let dist_b = minor_segs.iter()
-                                .map(|ms| b_segs.iter()
-                                    .map(|b_seg| segment_distance(ms, b_seg))
-                                    .min_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
-                                    .unwrap_or(f64::MAX))
-                                .min_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
-                                .unwrap_or(f64::MAX);
-                            dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map_or(&sorted_after[0], |n| *n);
-
-                    log::info!(
-                        "Diarization: шаг 2 — merging {} ({:.1}s, {:.0}%) into {} (no overlap, nearest major)",
-                        minor, minor_dur, minor_dur / total_duration * 100.0,
-                        nearest
-                    );
-                    for seg in result.iter_mut() {
-                        if seg.speaker_id == *minor {
-                            seg.speaker_id = nearest.to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Шаг 2 удалён: принудительное вливание минорных (<15%) спикеров в мажорных
+    // теряло реальных редких участников. Число кластеров теперь задаёт авто-оценка.
 
     // Финальная пересборка — склеиваем соседние сегменты одного спикера
     let mut merged: Vec<SpeakerSegment> = Vec::new();
@@ -625,12 +522,281 @@ fn postprocess_segments(segments: Vec<SpeakerSegment>) -> Vec<SpeakerSegment> {
     final_segments
 }
 
+/// ---- Путь 1 (primary): движок CrispASR (parakeet ASR + диаризация) ----
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct EngineSeg {
+    offsets: Option<Offsets>,
+    timestamps: Option<Timestamps>,
+    speaker: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct Offsets {
+    from: i64,
+    to: i64,
+}
+
+#[derive(Deserialize)]
+struct Timestamps {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct EngineTranscription {
+    transcription: Vec<EngineSeg>,
+}
+
+/// Парсит "00:00:02,880" (допускаются '.' и "mm:ss") в миллисекунды.
+fn ts_to_ms(s: &str) -> Option<i64> {
+    let parts: Vec<&str> = s.split(':').collect();
+    let (h, m, rest) = match parts.as_slice() {
+        [h, m, rest] => (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?, rest),
+        [m, rest] => (0i64, m.parse::<i64>().ok()?, rest),
+        _ => return None,
+    };
+    let mut sec_parts = rest.split(|c: char| c == ',' || c == '.');
+    let sec: i64 = sec_parts.next()?.parse().ok()?;
+    let ms: i64 = sec_parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some(h * 3_600_000 + m * 60_000 + sec * 1000 + ms)
+}
+
+/// Извлекает номер из "(speaker 0)".
+fn parse_speaker_num(s: &str) -> Option<usize> {
+    let num: String = s
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    num.parse().ok()
+}
+
+fn log_tail(path: &Path, prefix: &str) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(20);
+        log::warn!("{prefix}");
+        for l in &lines[start..] {
+            log::warn!("  {l}");
+        }
+    }
+}
+
+/// Разбирает diarized_json движка в (speaker_segments, subtitle_chunks).
+fn parse_engine_diarization(
+    json_path: &Path,
+) -> Option<(Vec<SpeakerSegment>, Vec<SubtitleChunk>)> {
+    let content = std::fs::read_to_string(json_path).ok()?;
+    let parsed: EngineTranscription = serde_json::from_str(&content).ok()?;
+    if parsed.transcription.is_empty() {
+        return None;
+    }
+
+    // Стабильные Speaker_N в порядке первого появления спикера.
+    let mut order: HashMap<usize, usize> = HashMap::new();
+    let mut seq = 1usize;
+    for seg in &parsed.transcription {
+        let key = parse_speaker_num(&seg.speaker).unwrap_or(usize::MAX);
+        if !order.contains_key(&key) {
+            order.insert(key, seq);
+            seq += 1;
+        }
+    }
+
+    let mut speaker_segments: Vec<SpeakerSegment> = Vec::new();
+    let mut subtitle_chunks: Vec<SubtitleChunk> = Vec::new();
+    for seg in &parsed.transcription {
+        let text = seg.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let (from_ms, to_ms) = match &seg.offsets {
+            Some(o) => (o.from, o.to),
+            None => match &seg.timestamps {
+                Some(t) => match (ts_to_ms(&t.from), ts_to_ms(&t.to)) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                },
+                None => continue,
+            },
+        };
+        let start = from_ms as f64 / 1000.0;
+        let end = to_ms as f64 / 1000.0;
+        if end <= start || end - start < 0.15 {
+            continue;
+        }
+        let key = parse_speaker_num(&seg.speaker).unwrap_or(usize::MAX);
+        let num = *order.get(&key).unwrap_or(&1);
+        let speaker_id = format!("Speaker_{num}");
+        speaker_segments.push(SpeakerSegment {
+            start_sec: start,
+            end_sec: end,
+            speaker_id: speaker_id.clone(),
+            gender: None,
+        });
+        subtitle_chunks.push(SubtitleChunk {
+            start_sec: start,
+            end_sec: end,
+            text: text.to_string(),
+            speaker_id: Some(speaker_id),
+            word_timestamps: None,
+        });
+    }
+
+    if speaker_segments.is_empty() {
+        return None;
+    }
+    speaker_segments.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap());
+    Some((speaker_segments, subtitle_chunks))
+}
+
+/// Один прогон CrispASR: parakeet ASR + VAD + диаризация с авто-оценкой
+/// числа спикеров (`--diarize-speakers`, сессионная кластеризация TitaNet).
+/// Возвращает None, если движок недоступен/не дал сегментов (→ fallback).
+fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<SubtitleChunk>)> {
+    if crate::is_cancelled() {
+        log::info!("Diarization: отменено пользователем");
+        return None;
+    }
+
+    let engine_exe = match crate::pick_engine_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Diarization: CrispASR недоступен: {e}");
+            return None;
+        }
+    };
+    let model = match crate::resolve_stt_model() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Diarization: STT-модель недоступна: {e}");
+            return None;
+        }
+    };
+
+    let prefix = std::env::temp_dir().join(format!("dubvidtra_diar_{}", std::process::id()));
+    let json_path = prefix.with_extension("json");
+    let stderr_log = prefix.with_extension("log");
+
+    log::info!(
+        "Diarization: [CrispASR] запускаем parakeet + диаризацию (--diarize-speakers, авто-число спикеров)..."
+    );
+
+    let stderr_file = match std::fs::File::create(&stderr_log) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("Diarization: не удалось открыть лог движка: {e}");
+            return None;
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let mut cmd = Command::new(&engine_exe);
+    cmd.arg("--backend")
+        .arg("parakeet")
+        .arg("-m")
+        .arg(&model)
+        .arg("-f")
+        .arg(wav_path)
+        .arg("--diarize-speakers")
+        .arg("--diarize-embedder")
+        .arg("auto")
+        .arg("--auto-download")
+        .arg("-ojf")
+        .arg("-of")
+        .arg(&prefix)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
+    let status = match cmd.status() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("Diarization: не удалось запустить движок: {e}");
+            return None;
+        }
+    };
+    log::info!(
+        "Diarization: [CrispASR] завершился за {:.1}s (exit={:?})",
+        start.elapsed().as_secs_f64(),
+        status.code()
+    );
+
+    if !status.success() {
+        log_tail(&stderr_log, "Diarization: движок завершился с ошибкой, stderr:");
+        return None;
+    }
+
+    let parsed = parse_engine_diarization(&json_path);
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&stderr_log);
+    if parsed.is_none() {
+        log::warn!("Diarization: движок завершился успешно, но JSON без сегментов");
+    }
+    parsed
+}
+
 pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
     let wav_path = match ctx.wav_path.as_deref() {
         Some(p) => p.to_string(),
         None => anyhow::bail!("Нет WAV файла"),
     };
 
+    // Путь 1: движок CrispASR — ASR + диаризация одним проходом.
+    if let Some((mut speaker_segments, subtitle_chunks)) = try_engine_diarization(&wav_path) {
+        let genders = detect_speaker_genders(&wav_path, &speaker_segments);
+        for seg in &mut speaker_segments {
+            seg.gender = genders.get(&seg.speaker_id).cloned();
+        }
+        let unique: std::collections::HashSet<&str> = speaker_segments
+            .iter()
+            .map(|s| s.speaker_id.as_str())
+            .collect();
+        log::info!(
+            "Diarization: [CrispASR] итого {} спикеров, {} речевых сегментов (транскрипция прилагается)",
+            unique.len(),
+            speaker_segments.len()
+        );
+        return Ok(PipelineContext {
+            speaker_segments: Some(speaker_segments),
+            subtitle_chunks: Some(subtitle_chunks),
+            ..ctx
+        });
+    }
+
+    // Путь 2 (fallback): sherpa-onnx с авто-числом кластеров.
+    log::warn!("Diarization: движок не дал сегментов — откат на sherpa-onnx (num_clusters=авто)");
+    let (mut speaker_segments, subtitle_chunks) = diarize_fallback_sherpa(&wav_path, &ctx)?;
+
+    let genders = detect_speaker_genders(&wav_path, &speaker_segments);
+    for seg in &mut speaker_segments {
+        seg.gender = genders.get(&seg.speaker_id).cloned();
+    }
+
+    Ok(PipelineContext {
+        speaker_segments: Some(speaker_segments),
+        subtitle_chunks,
+        ..ctx
+    })
+}
+
+/// Запасной путь: классическая sherpa-onnx диаризация (сегментация pyannote +
+/// эмбеддинги TitaNet). Число кластеров — авто-оценка (-1), если не задано вручную.
+fn diarize_fallback_sherpa(
+    wav_path: &str,
+    ctx: &PipelineContext,
+) -> Result<(Vec<SpeakerSegment>, Option<Vec<SubtitleChunk>>)> {
     let models_dir = models_dir();
     ensure_models_downloaded(&models_dir)?;
 
@@ -664,14 +830,14 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
         .config
         .diarization_threshold
         .unwrap_or(0.5);
-    // По умолчанию 2 кластера — TitaNet эмбеддинги сами разделят мужской/женский голос.
-    // -1 (авто) создаёт до 8 кластеров, потом мы их вручную склеиваем — это вносит ошибки.
+    // -1 (авто) — модель сама оценивает число кластеров. Раньше здесь жёстко стояло 2,
+    // из-за чего система находила только 2 спикера даже на видео с 4.
     let num_clusters = ctx
         .config
         .diarization_num_speakers
-        .unwrap_or(2);
+        .unwrap_or(-1);
 
-    log::info!("Diarization: инициализация sherpa-onnx диаризации");
+    log::info!("Diarization: инициализация sherpa-onnx диаризации (fallback)");
     log::info!("  seg_model: {}", seg_model.display());
     log::info!("  emb_model: {} (NeMo TitaNet EN)", emb_model.display());
     log::info!("  threshold={}, num_clusters={}", threshold, num_clusters);
@@ -703,7 +869,7 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
     let sd = OfflineSpeakerDiarization::create(&config)
         .context("Ошибка создания OfflineSpeakerDiarization — проверьте целостность моделей")?;
 
-    let audio = load_audio(&wav_path).context("Ошибка загрузки WAV")?;
+    let audio = load_audio(wav_path).context("Ошибка загрузки WAV")?;
     log::info!(
         "Diarization: обрабатываем {:.1}s аудио ({} сэмплов)",
         audio.len() as f64 / 16000.0,
@@ -714,10 +880,7 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
         Some(r) => r,
         None => {
             log::warn!("Diarization: процесс не вернул результатов");
-            return Ok(PipelineContext {
-                speaker_segments: Some(Vec::new()),
-                ..ctx
-            });
+            return Ok((Vec::new(), None));
         }
     };
 
@@ -781,19 +944,5 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
         None => None,
     };
 
-    // Определяем пол спикеров через анализ высоты тона
-    let genders = detect_speaker_genders(&wav_path, &speaker_segments);
-    let speaker_segments: Vec<SpeakerSegment> = speaker_segments
-        .into_iter()
-        .map(|mut seg| {
-            seg.gender = genders.get(&seg.speaker_id).cloned();
-            seg
-        })
-        .collect();
-
-    Ok(PipelineContext {
-        speaker_segments: Some(speaker_segments),
-        subtitle_chunks,
-        ..ctx
-    })
+    Ok((speaker_segments, subtitle_chunks))
 }

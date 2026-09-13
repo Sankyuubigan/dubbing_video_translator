@@ -1,77 +1,7 @@
 use crate::comm::{PipelineContext, SubtitleChunk, TimeSegment};
 use anyhow::{Context, Result};
-use std::path::Path;
 use std::time::Instant;
 use tauri::Manager;
-
-/// Ищет GGUF-модель STT. Приоритет:
-/// 1. env `DUBVID_STT_MODEL` (явный путь);
-/// 2. известные пути в `D:\nn\models\stt`;
-/// 3. рекурсивно по `D:\nn\models\stt` с предпочтением имени "parakeet".
-fn resolve_stt_model() -> Result<String> {
-    if let Ok(p) = std::env::var("DUBVID_STT_MODEL") {
-        if !p.is_empty() {
-            if Path::new(&p).exists() {
-                log::info!("STT: модель из DUBVID_STT_MODEL: {p}");
-                return Ok(p);
-            }
-            anyhow::bail!("STT: DUBVID_STT_MODEL задан, но файл не существует: {p}");
-        }
-    }
-
-    let candidates = [
-        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-q4_k.gguf",
-        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-fp16.gguf",
-        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-q8_0.gguf",
-    ];
-    for c in &candidates {
-        if Path::new(c).exists() {
-            log::info!("STT: модель найдена: {c}");
-            return Ok(c.to_string());
-        }
-    }
-
-    let root = Path::new(r"D:\nn\models\stt");
-    if root.is_dir() {
-        if let Some(p) = find_stt_gguf(root, "parakeet") {
-            log::info!("STT: модель найдена (поиск): {}", p.display());
-            return Ok(p.to_string_lossy().to_string());
-        }
-    }
-
-    anyhow::bail!(
-        "STT: GGUF-модель не найдена. Скачайте parakeet-tdt-0.6b-v3-q4_k.gguf \
-         в D:/nn/models/stt (или укажите DUBVID_STT_MODEL)"
-    )
-}
-
-/// Одноуровневый поиск GGUF под `root`; файлы, чьё имя содержит `prefer`, берутся первыми.
-fn find_stt_gguf(root: &Path, prefer: &str) -> Option<std::path::PathBuf> {
-    let mut matches: Vec<std::path::PathBuf> = Vec::new();
-    let dirs = std::fs::read_dir(root).ok()?;
-    for entry in dirs.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            if let Ok(sub) = std::fs::read_dir(&p) {
-                for e in sub.flatten() {
-                    let f = e.path();
-                    if f.is_file() && f.extension().and_then(|x| x.to_str()) == Some("gguf") {
-                        matches.push(f);
-                    }
-                }
-            }
-        } else if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("gguf") {
-            matches.push(p);
-        }
-    }
-    if let Some(pos) = matches
-        .iter()
-        .position(|m| m.file_name().and_then(|n| n.to_str()).unwrap_or("").contains(prefer))
-    {
-        return Some(matches.remove(pos));
-    }
-    matches.into_iter().next()
-}
 
 /// Вырезает сегмент [start_sec, end_sec) из preloaded-сэмплов и пишет mono WAV.
 fn write_segment_wav(out: &str, sample_rate: u32, samples: &[i16]) -> Result<()> {
@@ -91,6 +21,31 @@ fn write_segment_wav(out: &str, sample_rate: u32, samples: &[i16]) -> Result<()>
 }
 
 pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
+    // Быстрый путь: диаризация (CrispASR) уже вернула готовую транскрипцию
+    // с таймингами и спикерами — движок повторно не запускаем.
+    if let Some(chunks) = ctx.subtitle_chunks.as_ref() {
+        if chunks.iter().any(|c| c.speaker_id.is_some()) {
+            log::info!(
+                "STT: берём готовую транскрипцию от диаризации ({} чанков), CRISPAQR не запускаем",
+                chunks.len()
+            );
+            let final_chunks = split_long_chunks(chunks.clone());
+            if final_chunks.is_empty() {
+                anyhow::bail!("STT: транскрипция от диаризации пуста");
+            }
+            let total_s: f64 = final_chunks.iter().map(|c| c.end_sec - c.start_sec).sum();
+            log::info!(
+                "STT: распознано {} чанков ({} с речи) из готовой транскрипции",
+                final_chunks.len(),
+                total_s
+            );
+            return Ok(PipelineContext {
+                subtitle_chunks: Some(final_chunks),
+                ..ctx
+            });
+        }
+    }
+
     let wav_path = match ctx.wav_path.as_ref() {
         Some(p) => p,
         None => anyhow::bail!("Нет WAV файла"),
@@ -148,7 +103,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         .ok_or_else(|| anyhow::anyhow!("STT: AppHandle не инициализирован (запуск вне tauri?)"))?;
     let state = app.state::<tauri_plugin_speech::PluginState>();
     let engine_exe = crate::pick_engine_exe().map_err(|e| anyhow::anyhow!(e))?;
-    let model_path = resolve_stt_model()?;
+    let model_path = crate::resolve_stt_model().map_err(anyhow::Error::msg)?;
     let settings = tauri_plugin_speech::SttSettings {
         backend: "parakeet".into(),
         model: model_path,
@@ -261,8 +216,8 @@ fn split_long_chunks(chunks: Vec<SubtitleChunk>) -> Vec<SubtitleChunk> {
                 start_sec: current_start,
                 end_sec: current_end,
                 text: part,
-                speaker_id: None,
-                word_timestamps: None,
+                speaker_id: chunk.speaker_id.clone(),
+                word_timestamps: chunk.word_timestamps.clone(),
             });
             current_start = current_end;
         }
@@ -457,7 +412,7 @@ mod tests {
         let result = split_long_chunks(chunks);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].text, "Hello world.");
-        assert!(result[0].speaker_id.is_none());
+        assert_eq!(result[0].speaker_id.as_deref(), Some("Speaker_1"));
     }
 
     #[test]
@@ -475,7 +430,7 @@ mod tests {
         assert!(result[0].start_sec < result[0].end_sec);
         assert!(result[1].start_sec >= result[0].end_sec);
         for chunk in &result {
-            assert!(chunk.speaker_id.is_none());
+            assert_eq!(chunk.speaker_id.as_deref(), Some("Speaker_1"));
         }
     }
 

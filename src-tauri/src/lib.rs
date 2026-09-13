@@ -142,6 +142,75 @@ pub fn pick_engine_exe() -> Result<String, String> {
     ))
 }
 
+/// Ищет GGUF-модель STT. Приоритет:
+/// 1. env `DUBVID_STT_MODEL` (явный путь);
+/// 2. известные пути в `D:\nn\models\stt`;
+/// 3. поиск по `D:\nn\models\stt` с предпочтением имени "parakeet".
+pub fn resolve_stt_model() -> Result<String, String> {
+    if let Ok(p) = std::env::var("DUBVID_STT_MODEL") {
+        if !p.is_empty() {
+            if std::path::Path::new(&p).exists() {
+                log::info!("STT: модель из DUBVID_STT_MODEL: {p}");
+                return Ok(p);
+            }
+            return Err(format!(
+                "STT: DUBVID_STT_MODEL задан, но файл не существует: {p}"
+            ));
+        }
+    }
+
+    let candidates = [
+        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-q4_k.gguf",
+        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-fp16.gguf",
+        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-q8_0.gguf",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            log::info!("STT: модель найдена: {c}");
+            return Ok(c.to_string());
+        }
+    }
+
+    let root = std::path::Path::new(r"D:\nn\models\stt");
+    if root.is_dir() {
+        if let Some(p) = find_stt_gguf(root, "parakeet") {
+            log::info!("STT: модель найдена (поиск): {}", p.display());
+            return Ok(p.to_string_lossy().to_string());
+        }
+    }
+
+    Err("STT: GGUF-модель не найдена. Скачайте parakeet-tdt-0.6b-v3-q4_k.gguf \
+         в D:/nn/models/stt (или укажите DUBVID_STT_MODEL)".to_string())
+}
+
+/// Одноуровневый поиск GGUF под `root`; файлы, чьё имя содержит `prefer`, берутся первыми.
+fn find_stt_gguf(root: &std::path::Path, prefer: &str) -> Option<std::path::PathBuf> {
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    let dirs = std::fs::read_dir(root).ok()?;
+    for entry in dirs.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(&p) {
+                for e in sub.flatten() {
+                    let f = e.path();
+                    if f.is_file() && f.extension().and_then(|x| x.to_str()) == Some("gguf") {
+                        matches.push(f);
+                    }
+                }
+            }
+        } else if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("gguf") {
+            matches.push(p);
+        }
+    }
+    if let Some(pos) = matches
+        .iter()
+        .position(|m| m.file_name().and_then(|n| n.to_str()).unwrap_or("").contains(prefer))
+    {
+        return Some(matches.remove(pos));
+    }
+    matches.into_iter().next()
+}
+
 // ---- Log buffer ----
 
 #[derive(Debug, Clone, Serialize)]
