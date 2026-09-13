@@ -17,8 +17,8 @@ use log::{LevelFilter, Log, Metadata, Record};
 use serde::Serialize;
 use std::io::Write;
 use std::panic;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 
 // ---- LlamaBackend (for translation module, init once) ----
@@ -89,6 +89,58 @@ impl Drop for PipelineGuard {
 // ---- Global AppHandle (for log events) ----
 
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Глобальный AppHandle. Устанавливается в `setup` приложения; в чистом
+/// консольном запуске (без GUI) отсутствует → `None`.
+pub fn app_handle() -> Option<&'static tauri::AppHandle> {
+    APP_HANDLE.get()
+}
+
+// ---- Global async runtime (движки плагина — async: ensure/transcribe/speak) ----
+
+/// Блокирующий прогон async-фьючи на глобальном tokio runtime.
+pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    let rt = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+    });
+    rt.block_on(fut)
+}
+
+/// Подбирает исполняемый файл CrispASR: сохранённый в настройках backend,
+/// иначе cuda13 → cuda → cpu (первый существующий).
+pub fn pick_engine_exe() -> Result<String, String> {
+    let app = APP_HANDLE
+        .get()
+        .ok_or_else(|| "AppHandle не инициализирован".to_string())?;
+    let tss = tauri_plugin_speech::tts_settings::load(app);
+
+    let mut candidates: Vec<String> = Vec::new();
+    let saved = tss.engine_backend.trim();
+    if !saved.is_empty() {
+        candidates.push(saved.to_string());
+    }
+    for b in ["cuda13", "cuda", "cpu"] {
+        if !candidates.iter().any(|c| c == b) {
+            candidates.push(b.to_string());
+        }
+    }
+
+    for b in &candidates {
+        let p = tauri_plugin_speech::download::resolve_engine_exe(&tss.engine_dir, b);
+        if p.exists() {
+            return Ok(p.to_string_lossy().to_string());
+        }
+    }
+    Err(format!(
+        "crispasr.exe не найден (искал engines: {}). Проверьте TTS-настройки.",
+        candidates.join(", ")
+    ))
+}
 
 // ---- Log buffer ----
 
@@ -371,101 +423,15 @@ pub fn setup_logger() {
 
 // ---- Entry ----
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    truncate_logs();
-    setup_logger();
-
-    let app_cfg = config::load();
-
+/// Единый Builder: плагины + AppState + команды. Общий для GUI и headless.
+fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_speech::init())
         .manage(AppState {
             config: Mutex::new(app_cfg),
-        })
-        .setup(|app| {
-            APP_HANDLE.set(app.handle().clone()).ok();
-            log::info!("=== App initialized ===");
-
-            let app_handle = app.handle().clone();
-            if let Ok(video) = std::env::var("DUBVID_TEST_VIDEO") {
-                if !video.is_empty() {
-                    log::info!("=== AUTO: starting pipeline with {}", video);
-                    std::thread::spawn(move || {
-                        let _guard = match PipelineGuard::try_acquire() {
-                            Some(g) => g,
-                            None => {
-                                log::warn!("AUTO: pipeline уже запущен, пропускаем");
-                                return;
-                            }
-                        };
-                        let cfg = config::load();
-                        let sherpa_dir = cfg.sherpa_onnx_dir.clone().unwrap_or_default();
-                        let translate = cfg.gguf_model_path.clone().unwrap_or_default();
-                        if sherpa_dir.is_empty() || translate.is_empty() {
-                            log::info!("AUTO: missing models in config, skipping (need sherpa_onnx_dir + gguf_model_path)");
-                            return;
-                        }
-                        let pcfg = comm::PipelineConfig {
-                            input_path: video,
-                            output_format: "mp4".to_string(),
-                            gguf_model_path: Some(translate),
-                            ffmpeg_path: cfg.ffmpeg_path.clone(),
-                            vad_threshold_db: cfg.vad_threshold_db.clone(),
-                            sherpa_onnx_dir: cfg.sherpa_onnx_dir.clone(),
-                            stt_model: cfg.stt_model.clone(),
-                            diarization_threshold: cfg.diarization_threshold,
-                            diarization_num_speakers: cfg.diarization_num_speakers,
-            enable_dubbing: false,
-            mix_volume: cfg.mix_volume,
-                        };
-                        let ctx = comm::PipelineContext::new(pcfg);
-                        log::info!("AUTO: running pipeline...");
-                        let _ = app_handle.emit(
-                            "pipeline-progress",
-                            comm::ProgressUpdate {
-                                stage: "started".to_string(),
-                                percent: 0.0,
-                                result_path: None,
-                                error_message: None,
-                            },
-                        );
-                        let result = pipeline::run(ctx);
-                        match result {
-                            Ok(res) => {
-                                let out = res.output_path.unwrap_or_default();
-                                log::info!("AUTO: SUCCESS output={}", out);
-                                let _ = app_handle.emit(
-                                    "pipeline-progress",
-                                    comm::ProgressUpdate {
-                                        stage: "done".to_string(),
-                                        percent: 100.0,
-                                        result_path: Some(out),
-                                        error_message: None,
-                                    },
-                                );
-                            }
-                            Err(e) => {
-                                let err_msg = format!("{:#}", e);
-                                log::error!("AUTO: {}", err_msg);
-                                let _ = app_handle.emit(
-                                    "pipeline-progress",
-                                    comm::ProgressUpdate {
-                                        stage: "error".to_string(),
-                                        percent: 0.0,
-                                        result_path: None,
-                                        error_message: Some(err_msg),
-                                    },
-                                );
-                            }
-                        }
-                    });
-                }
-            }
-
-            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             is_pipeline_busy,
@@ -476,8 +442,158 @@ pub fn run() {
             get_logs,
             get_log_paths,
         ])
+}
+
+fn run_pipeline_blocking(
+    handle: tauri::AppHandle,
+    video: String,
+    enable_dubbing: bool,
+) -> Result<(), String> {
+    let _guard = PipelineGuard::try_acquire()
+        .ok_or_else(|| "pipeline уже запущен".to_string())?;
+    let cfg = config::load();
+    let pcfg = comm::PipelineConfig {
+        input_path: video,
+        output_format: "mp4".to_string(),
+        gguf_model_path: cfg.gguf_model_path.clone(),
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        vad_threshold_db: cfg.vad_threshold_db.clone(),
+        sherpa_onnx_dir: cfg.sherpa_onnx_dir.clone(),
+        stt_model: cfg.stt_model.clone(),
+        diarization_threshold: cfg.diarization_threshold,
+        diarization_num_speakers: cfg.diarization_num_speakers,
+        enable_dubbing,
+        mix_volume: cfg.mix_volume,
+    };
+    let ctx = comm::PipelineContext::new(pcfg);
+    log::info!("run_pipeline_blocking: запуск пайплайна...");
+    let _ = handle.emit(
+        "pipeline-progress",
+        comm::ProgressUpdate {
+            stage: "started".to_string(),
+            percent: 0.0,
+            result_path: None,
+            error_message: None,
+        },
+    );
+    let result = pipeline::run(ctx);
+    match result {
+        Ok(res) => {
+            let out = res.output_path.unwrap_or_default();
+            log::info!("run_pipeline_blocking: SUCCESS output={}", out);
+            let _ = handle.emit(
+                "pipeline-progress",
+                comm::ProgressUpdate {
+                    stage: "done".to_string(),
+                    percent: 100.0,
+                    result_path: Some(out),
+                    error_message: None,
+                },
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            log::error!("run_pipeline_blocking: {}", err_msg);
+            let _ = handle.emit(
+                "pipeline-progress",
+                comm::ProgressUpdate {
+                    stage: "error".to_string(),
+                    percent: 0.0,
+                    result_path: None,
+                    error_message: Some(err_msg.clone()),
+                },
+            );
+            Err(err_msg)
+        }
+    }
+}
+
+/// Запускает пайплайн отдельным потоком на полном tauri-приложении в фоне.
+fn spawn_pipeline_thread(handle: tauri::AppHandle, video: String, enable_dubbing: bool) {
+    std::thread::spawn(move || {
+        let _ = run_pipeline_blocking(handle.clone(), video, enable_dubbing);
+    });
+}
+
+/// Полноценное GUI-приложение Tauri.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    truncate_logs();
+    setup_logger();
+
+    let app_cfg = config::load();
+
+    base_builder(app_cfg)
+        .setup(|app| {
+            APP_HANDLE.set(app.handle().clone()).ok();
+            log::info!("=== App initialized ===");
+
+            let app_handle = app.handle().clone();
+            if let Ok(video) = std::env::var("DUBVID_TEST_VIDEO") {
+                if !video.is_empty() {
+                    log::info!("=== AUTO: starting pipeline with {}", video);
+                    spawn_pipeline_thread(app_handle, video, false);
+                }
+            }
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Headless-запуск: строит tauri-приложение (нужно для плагинов speech),
+/// запускает пайплайн в фоновом потоке и блокируется до завершения.
+///
+/// ВАЖНО: event loop (tao на Windows) обязан жить на main-потоке — поэтому
+/// `Builder::build()` + `app.run(...)` выполняются на вызывающем потоке,
+/// а пайплайн крутится в `std::thread::spawn`. Код выхода пишется в атомик
+/// и передаётся в `handle.exit(code)`; падение фонового потока → exit(1).
+///
+/// Возвращает: 0 — успех, 1 — ошибка пайплайна/падение.
+pub fn run_headless(video_path: String, enable_dubbing: bool) -> i32 {
+    truncate_logs();
+    setup_logger();
+
+    let app_cfg = config::load();
+
+    let app = base_builder(app_cfg)
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    APP_HANDLE.set(app.handle().clone()).ok();
+    log::info!("=== Headless app initialized ===");
+
+    let handle = app.handle().clone();
+    let exit_code: Arc<AtomicI32> = Arc::new(AtomicI32::new(-1));
+    let exit_code_inner = Arc::clone(&exit_code);
+
+    std::thread::spawn(move || {
+        let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            log::info!("=== HEADLESS: starting pipeline with {}", video_path);
+            match run_pipeline_blocking(handle.clone(), video_path, enable_dubbing) {
+                Ok(()) => 0,
+                Err(_) => 1,
+            }
+        }))
+        .unwrap_or_else(|_| {
+            log::error!("HEADLESS: паника в потоке пайплайна");
+            1
+        });
+        exit_code_inner.store(code, Ordering::SeqCst);
+        std::process::exit(code);
+    });
+
+    app.run(|_app_handle, _event| {});
+
+    let code = exit_code.load(Ordering::SeqCst);
+    if code < 0 {
+        log::error!("HEADLESS: приложение завершилось без кода выхода");
+        1
+    } else {
+        code
+    }
 }
 
 #[cfg(test)]
@@ -563,12 +679,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // требует запуска внутри tauri-приложения (движок STT — через plugin)
     fn test_qwen3_asr() {
         let cfg = config::load();
         run_pipeline(&cfg, "qwen3-asr", "Qwen3-ASR");
     }
 
     #[test]
+    #[ignore] // требует запуска внутри tauri-приложения (движок STT — через plugin)
     fn test_parakeet_tdt() {
         // Для Parakeet используем соответствующий путь
         let mut cfg = config::load();

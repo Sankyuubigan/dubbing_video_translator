@@ -31,6 +31,7 @@ tauri = { version = "2.0.0", features = [] }
 tauri-plugin-dialog = "2.0.0-rc"
 tauri-plugin-fs = "2.0.0-rc"
 tauri-plugin-process = "2.0.0-rc"
+tauri-plugin-speech = { path = "../../my-tauri-plugins/tauri-plugin-speech" }
 
 anyhow = "1.0"
 thiserror = "1.0"
@@ -44,6 +45,8 @@ sherpa-onnx = { version = "1.13.2", default-features = false, features = ["share
 bzip2 = "0.5"
 tar = "0.4"
 regex = "1.10"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
 
 [features]
 default = []

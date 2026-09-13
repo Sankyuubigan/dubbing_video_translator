@@ -1,169 +1,103 @@
 use crate::comm::{PipelineContext, SpeakerSegment};
 use anyhow::{Context, Result};
-use sherpa_onnx::{
-    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsModelConfig,
-    OfflineTtsVitsModelConfig,
-};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tauri::Manager;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const TTS_MODELS_SUBDIR: &str = "models\\tts";
-static MODELS: &[(&str, &str)] = &[
-    ("ru_RU-dmitri-medium", "male"),
-    ("ru_RU-ruslan-medium", "male"),
-    ("ru_RU-irina-medium", "female"),
-];
 
-fn project_root() -> PathBuf {
-    if cfg!(debug_assertions) {
-        return Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .to_path_buf();
+// --- Референсы голосового клона ---
+
+/// Выбирает сегмент спикера для клонирования голоса.
+/// Приоритет: длительность в диапазоне [3, 10] с ближайшей к 7 с;
+/// иначе — самый длинный сегмент (но не короче 1 с).
+fn pick_ref_segment(speaker: &str, segments: &[SpeakerSegment]) -> Option<(f64, f64)> {
+    let mine: Vec<&SpeakerSegment> = segments
+        .iter()
+        .filter(|s| s.speaker_id == speaker)
+        .collect();
+    if mine.is_empty() {
+        return None;
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().unwrap();
-        loop {
-            if dir.join("test").join("for_test.mp4").exists()
-                || dir.join("src").join("App.tsx").exists()
-            {
-                return dir.to_path_buf();
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => break,
+
+    let mut best: Option<(f64, f64, f64)> = None;
+    for s in &mine {
+        let d = s.end_sec - s.start_sec;
+        if (3.0..=10.0).contains(&d) {
+            let diff = (d - 7.0).abs();
+            if best.map_or(true, |b| diff < b.2) {
+                best = Some((s.start_sec, s.end_sec, diff));
             }
         }
     }
-    std::env::current_dir().unwrap_or_default()
-}
-
-fn models_dir() -> PathBuf {
-    project_root().join(TTS_MODELS_SUBDIR)
-}
-
-fn ensure_models_downloaded(models_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(models_dir)
-        .context("Ошибка создания директории для TTS моделей")?;
-
-    let espeak_dir = models_dir.join("espeak-ng-data");
-    if !espeak_dir.exists() {
-        log::info!("TTS: скачиваем espeak-ng-data (общий для всех Piper моделей)...");
-        let url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2";
-        let tar_path = models_dir.join("espeak-ng-data.tar.bz2");
-        download_file(url, &tar_path)?;
-        extract_tar_bz2(&tar_path, models_dir)?;
-        std::fs::remove_file(&tar_path).ok();
+    if let Some(b) = best {
+        return Some((b.0, b.1));
     }
 
-    for &(name, _gender) in MODELS {
-        let model_dir = models_dir.join(name);
-        let onnx = find_onnx_in_dir(&model_dir);
-        let tokens = model_dir.join("tokens.txt");
-        if onnx.is_some() && tokens.exists() {
-            log::info!("TTS: модель {} уже загружена", name);
-            continue;
-        }
-        log::info!("TTS: скачиваем модель {}...", name);
-        let url = format!(
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-{}.tar.bz2",
-            name
-        );
-        let tar_path = models_dir.join(format!("piper-{}.tar.bz2", name));
-        download_file(&url, &tar_path)?;
-        extract_tar_bz2(&tar_path, models_dir)?;
-        std::fs::remove_file(&tar_path).ok();
-
-        // Архив vits-piper-*.tar.bz2 распаковывается в vits-piper-{name}/,
-        // а код ожидает {name}/ — переименовываем при необходимости
-        let vits_dir = models_dir.join(format!("vits-piper-{}", name));
-        if vits_dir.is_dir() && !model_dir.exists() {
-            log::info!("TTS: переименовываем {} → {}", vits_dir.display(), model_dir.display());
-            std::fs::rename(&vits_dir, &model_dir)
-                .context(format!("Ошибка переименования {} → {}", vits_dir.display(), model_dir.display()))?;
-        }
+    let longest = mine
+        .iter()
+        .max_by(|a, b| {
+            let da = a.end_sec - a.start_sec;
+            let db = b.end_sec - b.start_sec;
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    let d = longest.end_sec - longest.start_sec;
+    if d >= 1.0 {
+        Some((longest.start_sec, longest.end_sec))
+    } else {
+        None
     }
+}
 
-    log::info!("TTS: все модели готовы");
+fn safe_speaker(speaker: &str) -> String {
+    let sanitized: String = speaker
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "speaker".to_string()
+    } else {
+        sanitized
+    }
+}
+
+// --- Время и длительность WAV ---
+
+fn wav_sr_and_duration(path: &Path) -> Result<(u32, f64)> {
+    let r = hound::WavReader::open(path).with_context(|| {
+        format!("TTS: открытие {}", path.display())
+    })?;
+    let sr = r.spec().sample_rate;
+    let dur = r.duration() as f64 / sr as f64;
+    Ok((sr, dur))
+}
+
+/// Вырезает сегмент [start_sec, end_sec) из preloaded-сэмплов и пишет mono WAV.
+fn write_segment_wav(out: &str, sample_rate: u32, samples: &[i16]) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(out, spec)
+        .with_context(|| format!("TTS: создание {}", out))?;
+    for &s in samples {
+        writer.write_sample(s).ok();
+    }
+    writer.finalize().ok();
     Ok(())
 }
 
-fn find_onnx_in_dir(dir: &Path) -> Option<PathBuf> {
-    if !dir.is_dir() {
-        return None;
-    }
-    for entry in std::fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("onnx") {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn download_file(url: &str, path: &Path) -> Result<()> {
-    crate::download::download_file(url, path)
-}
-
-fn extract_tar_bz2(archive: &Path, dest: &Path) -> Result<()> {
-    crate::download::extract_tar_bz2(archive, dest)
-}
-
-fn assign_voices(
-    speaker_segments: &[SpeakerSegment],
-) -> HashMap<String, String> {
-    let unique_speakers: Vec<&str> = {
-        let mut seen: Vec<&str> = speaker_segments
-            .iter()
-            .map(|s| s.speaker_id.as_str())
-            .collect();
-        seen.sort();
-        seen.dedup();
-        seen
-    };
-
-    let mut genders: HashMap<&str, &str> = HashMap::new();
-    for seg in speaker_segments {
-        if let Some(ref g) = seg.gender {
-            genders.entry(seg.speaker_id.as_str()).or_insert(g);
-        }
-    }
-
-    let male_voices: Vec<&str> = MODELS
-        .iter()
-        .filter(|(_, g)| *g == "male")
-        .map(|(n, _)| *n)
-        .collect();
-    let female_voices: Vec<&str> = MODELS
-        .iter()
-        .filter(|(_, g)| *g == "female")
-        .map(|(n, _)| *n)
-        .collect();
-
-    let mut voice_map: HashMap<String, String> = HashMap::new();
-    let mut male_idx = 0usize;
-    let mut female_idx = 0usize;
-
-    for speaker in &unique_speakers {
-        let gender = genders.get(speaker).copied().unwrap_or("male");
-        let voice = if gender == "female" {
-            let v = female_voices[female_idx % female_voices.len()];
-            female_idx += 1;
-            v
-        } else {
-            let v = male_voices[male_idx % male_voices.len()];
-            male_idx += 1;
-            v
-        };
-        log::info!("TTS: {} ({}) → {}", speaker, gender, voice);
-        voice_map.insert(speaker.to_string(), voice.to_string());
-    }
-    voice_map
-}
+// --- FFmpeg помощники ---
 
 /// Применяет time-stretch через FFmpeg rubberband-фильтр.
 /// rubberband сохраняет pitch (голос не становится бурундуком),
@@ -236,6 +170,8 @@ fn resample_wav(
     Ok(())
 }
 
+// --- Основной пайплайн озвучки ---
+
 pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
     if !ctx.config.enable_dubbing {
         log::info!("TTS: озвучка отключена, пропускаем");
@@ -264,64 +200,46 @@ pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
         }
     };
 
-    let models_dir = models_dir();
-    ensure_models_downloaded(&models_dir)?;
+    // Инициализация движка CrispASR (cosyvoice3-tts, GPU).
+    let app = crate::app_handle()
+        .ok_or_else(|| anyhow::anyhow!("TTS: AppHandle не инициализирован (запуск вне tauri?)"))?;
+    let state = app.state::<tauri_plugin_speech::PluginState>();
+    let tss = tauri_plugin_speech::tts_settings::load(app);
+    let models_dir = if tss.models_dir.trim().is_empty() {
+        tauri_plugin_speech::download::default_models_dir()
+    } else {
+        PathBuf::from(tss.models_dir.clone())
+    };
+    let engine_exe = crate::pick_engine_exe().map_err(|e| anyhow::anyhow!(e))?;
+    log::info!("TTS: движок {} / модели {}", engine_exe, models_dir.display());
 
-    let voice_map = assign_voices(speaker_segments);
-    let espeak_dir = models_dir.join("espeak-ng-data");
+    // Движок стартует ЛЕНИВО, на каждый спикер отдельно: cosyvoice3 синтезирует
+    // WAV-клон ТОЛЬКО из голоса, поданного при старте через `--voice <ref>`
+    // (имена, зарегистрированные через /v1/voices, бэкенд не резолвит —
+    // «voice not found (have 8)»). При смене спикера ensure() перезапускает движок
+    // с новым референсом.
 
-    // Инициализируем TTS движки для нужных голосов
-    let mut tts_cache: HashMap<String, OfflineTts> = HashMap::new();
-    for voice_name in voice_map.values() {
-        if tts_cache.contains_key(voice_name) {
-            continue;
-        }
-        let model_dir = models_dir.join(voice_name);
-        let onnx = find_onnx_in_dir(&model_dir)
-            .unwrap_or_else(|| panic!("TTS: не найден .onnx для {}", voice_name));
-        let tokens = model_dir.join("tokens.txt");
-        let tokens_str = tokens.to_string_lossy().to_string();
-        let onnx_str = onnx.to_string_lossy().to_string();
-
-        let config = OfflineTtsConfig {
-            model: OfflineTtsModelConfig {
-                vits: OfflineTtsVitsModelConfig {
-                    model: Some(onnx_str),
-                    tokens: Some(tokens_str),
-                    data_dir: Some(espeak_dir.to_string_lossy().to_string()),
-                    ..Default::default()
-                },
-                num_threads: 2,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        match OfflineTts::create(&config) {
-            Some(tts) => {
-                log::info!("TTS: загружен голос {}", voice_name);
-                tts_cache.insert(voice_name.to_string(), tts);
-            }
-            None => {
-                anyhow::bail!("TTS: ошибка загрузки {}: OfflineTts::create вернул None", voice_name);
-            }
-        }
-    }
-
-    // Определяем общую длительность видео из WAV
+    // Preload исходный WAV (16 кГц mono) для вырезания референсов.
     let reader = hound::WavReader::open(wav_path)
-        .context("Ошибка открытия WAV для определения длительности")?;
-    let total_samples = reader.duration() as usize;
-    let canvas_sr = reader.spec().sample_rate as usize;
-    drop(reader);
-    let total_duration_sec = total_samples as f64 / canvas_sr as f64;
+        .with_context(|| format!("TTS: открытие {}", wav_path))?;
+    let src_sr = reader.spec().sample_rate;
+    let src_samples: Vec<i16> = reader
+        .into_samples::<i16>()
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("TTS: чтение сэмплов: {e}"))?;
+    let total_duration_sec = src_samples.len() as f64 / src_sr as f64;
 
-    // Холст для финального аудиоозвучки (16000 Гц)
+    // Холст для финальной озвучки (16 кГц).
     let out_sr: usize = 16000;
     let canvas_len = (total_duration_sec * out_sr as f64).ceil() as usize;
     let mut canvas: Vec<f32> = vec![0.0; canvas_len];
 
     let tmp_dir = std::env::temp_dir();
     let ffmpeg_path = ctx.config.ffmpeg_path.clone();
+
+    // Карта спикера → путь к стартовому референсу (24кГц).
+    let mut voice_map: HashMap<String, PathBuf> = HashMap::new();
+    let mut current_startup_voice = String::new();
 
     for (idx, chunk) in translated.iter().enumerate() {
         let text = chunk.text.trim();
@@ -332,99 +250,93 @@ pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
             .speaker_id
             .as_deref()
             .unwrap_or("Speaker_1");
-        let voice_name = match voice_map.get(speaker_id) {
-            Some(v) => v,
+
+        let ref24 = match voice_map.get(speaker_id) {
+            Some(v) => v.clone(),
             None => {
-                log::warn!("TTS: нет голоса для {}, пропускаем", speaker_id);
-                continue;
+                // Создаём клон-референс по голосу спикера (16кГц → 24кГц для --voice).
+                let seg = pick_ref_segment(speaker_id, speaker_segments)
+                    .ok_or_else(|| anyhow::anyhow!("TTS: нет референсного сегмента для {}", speaker_id))?;
+                let start = (seg.0 * src_sr as f64) as usize;
+                let end = ((seg.1 * src_sr as f64) as usize).min(src_samples.len());
+                if start >= end {
+                    anyhow::bail!("TTS: пустой референс для {}", speaker_id);
+                }
+                let safe = safe_speaker(speaker_id);
+                let ref16 = tmp_dir.join(format!("dubvidtra_tts_ref_{}.wav", safe));
+                write_segment_wav(
+                    &ref16.to_string_lossy(),
+                    src_sr,
+                    &src_samples[start..end],
+                )?;
+                let ref24 = tmp_dir.join(format!("dubvidtra_tts_ref_{}_24k.wav", safe));
+                resample_wav(
+                    &ref16.to_string_lossy(),
+                    &ref24.to_string_lossy(),
+                    24000,
+                    &ffmpeg_path,
+                )?;
+
+                log::info!(
+                    "TTS: спикер {} → стартовый голос {} (референс {:.1}–{:.1}с)",
+                    speaker_id,
+                    ref24.display(),
+                    seg.0,
+                    seg.1
+                );
+                voice_map.insert(speaker_id.to_string(), ref24.clone());
+                ref24
             }
         };
-        let tts = match tts_cache.get(voice_name) {
-            Some(t) => t,
-            None => continue,
-        };
+
+        // Перезапуск движка с референсом спикера, если он сменился.
+        let startup_str = ref24.to_string_lossy().to_string();
+        if startup_str != current_startup_voice {
+            crate::block_on(state.tts.ensure(
+                app,
+                &engine_exe,
+                "cosyvoice3-tts",
+                &models_dir.to_string_lossy().to_string(),
+                "cosyvoice3-tts",
+                &startup_str,
+            ))
+            .map_err(|e| anyhow::anyhow!("TTS: запуск движка: {e}"))?;
+            current_startup_voice = startup_str;
+        }
 
         log::info!(
-            "TTS: [{}/{}] ({:.1}s–{:.1}s) [{}] {} -> {}",
+            "TTS: [{}/{}] ({:.1}s–{:.1}s) [{}] {}",
             idx + 1,
             translated.len(),
             chunk.start_sec,
             chunk.end_sec,
             speaker_id,
-            voice_name,
-            text
+            text,
         );
 
-        let callback: Option<fn(&[f32], f32) -> bool> = None;
+        // Cross-lingual clone: EN-референс (startup voice) → RU-синтез.
+        let (wav_bytes, _timing) = crate::block_on(state.tts.speak(
+            text,
+            "",
+            "",
+            "",
+            1.0,
+            true,
+            "ru",
+            "en",
+        ))
+        .map_err(|e| {
+            anyhow::anyhow!("TTS: синтез [{}] '{}': {}", idx + 1, text, e)
+        })?;
 
-        // Первая генерация со скоростью 1.0
-        let gen_config = GenerationConfig {
-            sid: 0,
-            speed: 1.0,
-            ..Default::default()
-        };
-        let audio = match tts.generate_with_config(text, &gen_config, callback) {
-            Some(a) => a,
-            None => {
-                log::warn!("TTS: генерация вернула None для '{}'", text);
-                continue;
-            }
-        };
-        let mut audio_data: Vec<f32> = audio.samples().to_vec();
-        let mut gen_sr = audio.sample_rate() as usize;
-        let mut gen_duration = audio_data.len() as f64 / gen_sr as f64;
-
-        // Если сгенерированное аудио слишком длинное — перегенерируем
-        // с повышенной скоростью VITS, чтобы уменьшить time-stretch ratio
-        let target_duration = chunk.end_sec - chunk.start_sec;
-        if gen_duration > target_duration {
-            let needed_speed = gen_duration / target_duration;
-            let max_speed = 3.0;
-            let adjusted_speed = needed_speed.min(max_speed);
-            if adjusted_speed > 1.05 {
-                let orig_duration = gen_duration;
-                log::info!(
-                    "TTS: перегенерация [{}/{}] со speed={:.2} (needed={:.2})",
-                    idx + 1, translated.len(), adjusted_speed, needed_speed
-                );
-                let fast_config = GenerationConfig {
-                    sid: 0,
-                    speed: adjusted_speed as f32,
-                    ..Default::default()
-                };
-                if let Some(fast_audio) = tts.generate_with_config(text, &fast_config, callback) {
-                    audio_data = fast_audio.samples().to_vec();
-                    gen_sr = fast_audio.sample_rate() as usize;
-                    gen_duration = audio_data.len() as f64 / gen_sr as f64;
-                    log::info!(
-                        "TTS: после перегенерации длительность={:.1}s (было {:.1}s)",
-                        gen_duration, orig_duration
-                    );
-                }
-            }
-        }
-
-        // Сохраняем сырой аудио-кусок во временный WAV
+        // Сырой ответ движка — WAV 24 кГц mono.
         let raw_wav = tmp_dir.join(format!("dubvidtra_tts_raw_{}.wav", idx));
-        {
-            let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: gen_sr as u32,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            let mut writer =
-                hound::WavWriter::create(&raw_wav, spec).context("Ошибка создания raw WAV")?;
-            for &s in &audio_data {
-                let clamped = s.clamp(-1.0, 1.0);
-                writer
-                    .write_sample((clamped * 32767.0) as i16)
-                    .ok();
-            }
-            writer.finalize().ok();
-        }
+        std::fs::write(&raw_wav, &wav_bytes)
+            .with_context(|| format!("TTS: запись raw WAV {}", raw_wav.display()))?;
+        let (gen_sr, gen_duration) = wav_sr_and_duration(&raw_wav)?;
+        let target_duration = chunk.end_sec - chunk.start_sec;
 
-        // Time-stretch при необходимости
+        // Time-stretch при необходимости.
         let stretched_wav = tmp_dir.join(format!("dubvidtra_tts_stretched_{}.wav", idx));
         if gen_duration > target_duration {
             time_stretch_wav(
@@ -438,7 +350,7 @@ pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
             std::fs::copy(&raw_wav, &stretched_wav).ok();
         }
 
-        // Ресемплинг до 16 кГц
+        // Ресемплинг до 16 кГц.
         let resampled_wav = tmp_dir.join(format!("dubvidtra_tts_final_{}.wav", idx));
         resample_wav(
             &stretched_wav.to_string_lossy(),
@@ -447,17 +359,17 @@ pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
             &ffmpeg_path,
         )?;
 
-        // Читаем обработанный WAV
+        // Читаем обработанный WAV.
         let final_samples: Vec<f32> = {
             let r = hound::WavReader::open(&resampled_wav)
-                .context("Ошибка чтения финального WAV")?;
+                .context("TTS: чтение финального WAV")?;
             r.into_samples::<i16>()
                 .filter_map(|s| s.ok())
                 .map(|s| s as f32 / 32768.0)
                 .collect()
         };
 
-        // Вставляем в холст по смещению
+        // Вставляем в холст по смещению.
         let offset = (chunk.start_sec * out_sr as f64) as usize;
         for (i, &s) in final_samples.iter().enumerate() {
             let pos = offset + i;
@@ -466,13 +378,31 @@ pub fn dub(ctx: PipelineContext) -> Result<PipelineContext> {
             }
         }
 
-        // Чистим временные файлы
+        log::info!(
+            "TTS: [{}] готово (gen={:.1}s @{}k, target={:.1}s)",
+            idx + 1,
+            gen_duration,
+            gen_sr / 1000,
+            target_duration
+        );
+
+        // Чистим временные файлы чанка.
         std::fs::remove_file(&raw_wav).ok();
         std::fs::remove_file(&stretched_wav).ok();
         std::fs::remove_file(&resampled_wav).ok();
     }
 
-    // Сохраняем финальную дорожку озвучки
+    // Чистим референсные WAV.
+    for key in voice_map.keys() {
+        let safe = safe_speaker(key);
+        std::fs::remove_file(tmp_dir.join(format!("dubvidtra_tts_ref_{}.wav", safe))).ok();
+        std::fs::remove_file(tmp_dir.join(format!("dubvidtra_tts_ref_{}_24k.wav", safe))).ok();
+    }
+
+    // Останавливаем движок.
+    crate::block_on(state.tts.stop());
+
+    // Сохраняем финальную дорожку озвучки.
     let dubbed_path = tmp_dir
         .join("dubvidtra_dubbed.wav")
         .to_string_lossy()

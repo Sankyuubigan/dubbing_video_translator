@@ -21,12 +21,6 @@
 - Вопрос: структура архива внутри — с vits-префиксом в директории или без?
 - espeak-ng-data: Connection reset — сетевая проблема (GitHub блокируется?)
 
-### Download механизм
-- Три fallback: PowerShell → curl → bitsadmin
-- PowerShell: Invoke-WebRequest с TLS 1.2
-- curl: with --ssl-reqd
-- bitsadmin: Windows built-in
-
 ## Technical Decisions
 | Decision | Rationale |
 |----------|-----------|
@@ -37,7 +31,7 @@
 ## Issues Encountered
 | Issue | Resolution |
 |-------|------------|
-| sccache build error | Build env issue, cargo check проходит |
+| sccache build error | Ошибка окружения/кэширования C++ зависимостей (описано в глобальных правилах) |
 | piper model 404 | Исправлен URL на vits-piper- |
 | espeak-ng-data connection reset | Сетевая проблема GitHub |
 

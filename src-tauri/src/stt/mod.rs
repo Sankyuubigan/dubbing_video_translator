@@ -1,145 +1,93 @@
 use crate::comm::{PipelineContext, SubtitleChunk, TimeSegment};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::time::Instant;
+use tauri::Manager;
 
-fn find_model_file(dir: &str, name: &str) -> Option<std::path::PathBuf> {
-    for variant in &[
-        format!("{}.int8.onnx", name),
-        format!("{}.fp16.onnx", name),
-        format!("{}.onnx", name),
-    ] {
-        let p = std::path::Path::new(dir).join(variant);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn resolve_model_dir(cfg_dir: &Option<String>, stt_model: &str) -> Option<String> {
-    if let Some(d) = cfg_dir {
-        let p = Path::new(d);
-        if stt_model == "parakeet-tdt" {
-            if p.join("joiner.int8.onnx").exists() || p.join("joiner.onnx").exists() || p.join("joiner.fp16.onnx").exists() {
-                return Some(d.clone());
+/// Ищет GGUF-модель STT. Приоритет:
+/// 1. env `DUBVID_STT_MODEL` (явный путь);
+/// 2. известные пути в `D:\nn\models\stt`;
+/// 3. рекурсивно по `D:\nn\models\stt` с предпочтением имени "parakeet".
+fn resolve_stt_model() -> Result<String> {
+    if let Ok(p) = std::env::var("DUBVID_STT_MODEL") {
+        if !p.is_empty() {
+            if Path::new(&p).exists() {
+                log::info!("STT: модель из DUBVID_STT_MODEL: {p}");
+                return Ok(p);
             }
-        } else if p.join("conv_frontend.onnx").exists() {
-            return Some(d.clone());
+            anyhow::bail!("STT: DUBVID_STT_MODEL задан, но файл не существует: {p}");
         }
     }
 
-    let candidates = if stt_model == "parakeet-tdt" {
-        vec![
-            r"D:\nn\models\stt\parakeet-tdt-0.6b-v3-sherpa-onnx-fp16".to_string(),
-            r"D:\nn\models\stt\parakeet-tdt-0.6b-v2-sherpa-onnx-int8".to_string(),
-        ]
-    } else {
-        vec![
-            r"D:\nn\models\stt\qwen3-asr-1.7b-sherpa-onnx".to_string(),
-            r"D:\nn\models\stt\qwen3-asr-0.6b-sherpa-onnx".to_string(),
-        ]
-    };
-
+    let candidates = [
+        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-q4_k.gguf",
+        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-fp16.gguf",
+        r"D:\nn\models\stt\parakeet-tdt-0.6b-v3\parakeet-tdt-0.6b-v3-q8_0.gguf",
+    ];
     for c in &candidates {
-        let p = Path::new(c);
-        if stt_model == "parakeet-tdt" {
-            if p.join("joiner.int8.onnx").exists() || p.join("joiner.onnx").exists() {
-                log::info!("STT: найдена модель по пути {}", c);
-                return Some(c.clone());
-            }
-        } else if p.join("conv_frontend.onnx").exists() {
-            log::info!("STT: найдена модель по пути {}", c);
-            return Some(c.clone());
+        if Path::new(c).exists() {
+            log::info!("STT: модель найдена: {c}");
+            return Ok(c.to_string());
         }
     }
 
-    cfg_dir.clone()
+    let root = Path::new(r"D:\nn\models\stt");
+    if root.is_dir() {
+        if let Some(p) = find_stt_gguf(root, "parakeet") {
+            log::info!("STT: модель найдена (поиск): {}", p.display());
+            return Ok(p.to_string_lossy().to_string());
+        }
+    }
+
+    anyhow::bail!(
+        "STT: GGUF-модель не найдена. Скачайте parakeet-tdt-0.6b-v3-q4_k.gguf \
+         в D:/nn/models/stt (или укажите DUBVID_STT_MODEL)"
+    )
 }
 
-fn create_qwen3_recognizer(model_dir: &str) -> Result<sherpa_onnx::OfflineRecognizer> {
-    let conv_frontend = Path::new(model_dir).join("conv_frontend.onnx");
-    if !conv_frontend.exists() {
-        anyhow::bail!("STT Qwen3-ASR: conv_frontend.onnx не найден в {}", model_dir);
+/// Одноуровневый поиск GGUF под `root`; файлы, чьё имя содержит `prefer`, берутся первыми.
+fn find_stt_gguf(root: &Path, prefer: &str) -> Option<std::path::PathBuf> {
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    let dirs = std::fs::read_dir(root).ok()?;
+    for entry in dirs.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(&p) {
+                for e in sub.flatten() {
+                    let f = e.path();
+                    if f.is_file() && f.extension().and_then(|x| x.to_str()) == Some("gguf") {
+                        matches.push(f);
+                    }
+                }
+            }
+        } else if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("gguf") {
+            matches.push(p);
+        }
     }
-    let encoder = find_model_file(model_dir, "encoder")
-        .ok_or_else(|| anyhow::anyhow!("STT Qwen3-ASR: encoder.onnx не найден в {}", model_dir))?;
-    let decoder = find_model_file(model_dir, "decoder")
-        .ok_or_else(|| anyhow::anyhow!("STT Qwen3-ASR: decoder.onnx не найден в {}", model_dir))?;
-    let tokenizer = Path::new(model_dir).join("tokenizer");
-    if !tokenizer.is_dir() {
-        anyhow::bail!("STT Qwen3-ASR: директория tokenizer не найдена: {}", tokenizer.display());
+    if let Some(pos) = matches
+        .iter()
+        .position(|m| m.file_name().and_then(|n| n.to_str()).unwrap_or("").contains(prefer))
+    {
+        return Some(matches.remove(pos));
     }
-
-    let asr_cfg = sherpa_onnx::OfflineQwen3ASRModelConfig {
-        conv_frontend: Some(conv_frontend.to_string_lossy().to_string()),
-        encoder: Some(encoder.to_string_lossy().to_string()),
-        decoder: Some(decoder.to_string_lossy().to_string()),
-        tokenizer: Some(tokenizer.to_string_lossy().to_string()),
-        max_total_len: 1024,
-        max_new_tokens: 512,
-        temperature: 1e-6,
-        top_p: 0.8,
-        seed: 42,
-        hotwords: None,
-    };
-
-    let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
-    cfg.model_config.qwen3_asr = asr_cfg;
-    cfg.model_config.num_threads = 4;
-    cfg.model_config.debug = false;
-    cfg.model_config.provider = Some("cuda".into());
-    cfg.model_config.num_threads = 2;
-
-    let recognizer = sherpa_onnx::OfflineRecognizer::create(&cfg)
-        .unwrap_or_else(|| {
-            log::info!("STT: CUDA недоступен, пробуем CPU");
-            cfg.model_config.provider = Some("cpu".into());
-            cfg.model_config.num_threads = 4;
-            sherpa_onnx::OfflineRecognizer::create(&cfg)
-                .expect("STT: ошибка создания OfflineRecognizer (CPU)")
-        });
-
-    Ok(recognizer)
+    matches.into_iter().next()
 }
 
-fn create_parakeet_recognizer(model_dir: &str) -> Result<sherpa_onnx::OfflineRecognizer> {
-    let encoder = find_model_file(model_dir, "encoder")
-        .ok_or_else(|| anyhow::anyhow!("STT Parakeet: encoder.onnx не найден в {}", model_dir))?;
-    let decoder = find_model_file(model_dir, "decoder")
-        .ok_or_else(|| anyhow::anyhow!("STT Parakeet: decoder.onnx не найден в {}", model_dir))?;
-    let joiner = find_model_file(model_dir, "joiner")
-        .ok_or_else(|| anyhow::anyhow!("STT Parakeet: joiner.onnx не найден в {}", model_dir))?;
-    let tokens = Path::new(model_dir).join("tokens.txt");
-    if !tokens.exists() {
-        anyhow::bail!("STT Parakeet: tokens.txt не найден в {}", model_dir);
-    }
-
-    let transducer_cfg = sherpa_onnx::OfflineTransducerModelConfig {
-        encoder: Some(encoder.to_string_lossy().to_string()),
-        decoder: Some(decoder.to_string_lossy().to_string()),
-        joiner: Some(joiner.to_string_lossy().to_string()),
+/// Вырезает сегмент [start_sec, end_sec) из preloaded-сэмплов и пишет mono WAV.
+fn write_segment_wav(out: &str, sample_rate: u32, samples: &[i16]) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
     };
-
-    let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
-    cfg.model_config.transducer = transducer_cfg;
-    cfg.model_config.tokens = Some(tokens.to_string_lossy().to_string());
-    cfg.model_config.model_type = Some("nemo_transducer".into());
-    cfg.model_config.num_threads = 4;
-    cfg.model_config.debug = false;
-    cfg.model_config.provider = Some("cuda".into());
-    cfg.model_config.num_threads = 2;
-
-    let recognizer = sherpa_onnx::OfflineRecognizer::create(&cfg)
-        .unwrap_or_else(|| {
-            log::info!("STT: CUDA недоступен, пробуем CPU");
-            cfg.model_config.provider = Some("cpu".into());
-            cfg.model_config.num_threads = 4;
-            sherpa_onnx::OfflineRecognizer::create(&cfg)
-                .expect("STT: ошибка создания OfflineRecognizer (CPU)")
-        });
-
-    Ok(recognizer)
+    let mut writer = hound::WavWriter::create(out, spec)
+        .with_context(|| format!("STT: создание {}", out))?;
+    for &s in samples {
+        writer.write_sample(s).ok();
+    }
+    writer.finalize().ok();
+    Ok(())
 }
 
 pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
@@ -148,14 +96,9 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         None => anyhow::bail!("Нет WAV файла"),
     };
 
-    let stt_model = ctx.config.stt_model.as_deref().unwrap_or("qwen3-asr");
-    let model_dir = resolve_model_dir(&ctx.config.sherpa_onnx_dir, stt_model);
-    let model_dir = model_dir.as_deref().ok_or_else(|| anyhow::anyhow!(
-        "Не указана директория sherpa-onnx модели"
-    ))?;
-
-    // ПРОФЕССИОНАЛЬНЫЙ ПАЙПЛАЙН: Используем сегменты диаризации как источник истины.
-    // Это гарантирует, что в каждом куске аудио только один спикер!
+    // ПРОФЕССИОНАЛЬНЫЙ ПАЙПЛАЙН: сегменты диаризации — источник истины.
+    // Каждый кусок аудио содержит ровно одного спикера. Если диаризации нет —
+    // откат на VAD.
     let base_segments = if let Some(speakers) = ctx.speaker_segments.as_ref() {
         speakers.iter().map(|s| TimeSegment {
             start_sec: s.start_sec,
@@ -167,9 +110,8 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         anyhow::bail!("Нет ни сегментов диаризации, ни VAD");
     };
 
-    // ИСПРАВЛЕНИЕ ПРОПУСКОВ РЕЧИ:
-    // Qwen3-ASR "захлебывается" и выдает пустоту на кусках длиннее 15 секунд.
-    // Жестко дробим любые сегменты длиннее 15 секунд.
+    // Дробим сегменты: слишком длинные куски (компрессия контекста) дают
+    // пропуски при распознавании. Держим ≤ 15 с.
     let mut segments = Vec::new();
     for seg in base_segments {
         let mut curr_start = seg.start_sec;
@@ -183,70 +125,94 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         }
     }
 
-    let wave = sherpa_onnx::Wave::read(wav_path)
-        .ok_or_else(|| anyhow::anyhow!("STT: ошибка чтения WAV: {}", wav_path))?;
-    let sample_rate = wave.sample_rate();
-    let all_samples = wave.samples();
+    // Preload WAV один раз (16 кГц mono, PCM s16le — как выдаёт audio_extractor).
+    let reader = hound::WavReader::open(wav_path)
+        .with_context(|| format!("STT: открытие {}", wav_path))?;
+    let spec = reader.spec();
+    if spec.channels != 1 {
+        anyhow::bail!("STT: ожидался mono WAV, получено {} каналов", spec.channels);
+    }
+    if spec.sample_rate != 16000 {
+        anyhow::bail!("STT: ожидался WAV 16 кГц, получено {}", spec.sample_rate);
+    }
+    let sample_rate = spec.sample_rate;
+    let all_samples: Vec<i16> = reader
+        .into_samples::<i16>()
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("STT: чтение сэмплов: {e}"))?;
+    log::info!("STT: WAV {} — {} сэмплов ({} с)", wav_path, all_samples.len(), all_samples.len() as f64 / sample_rate as f64);
+    let min_segment_samples = (sample_rate as usize) / 4; // < 250 мс — шум, пропускаем
 
-    let recognizer = if stt_model == "parakeet-tdt" {
-        create_parakeet_recognizer(model_dir)?
-    } else {
-        create_qwen3_recognizer(model_dir)?
+    // Инициализация движка CrispASR (parakeet, GPU).
+    let app = crate::app_handle()
+        .ok_or_else(|| anyhow::anyhow!("STT: AppHandle не инициализирован (запуск вне tauri?)"))?;
+    let state = app.state::<tauri_plugin_speech::PluginState>();
+    let engine_exe = crate::pick_engine_exe().map_err(|e| anyhow::anyhow!(e))?;
+    let model_path = resolve_stt_model()?;
+    let settings = tauri_plugin_speech::SttSettings {
+        backend: "parakeet".into(),
+        model: model_path,
+        engine_exe,
+        vad: false, // голосовую активность уже дали VAD + диаризация
+        ws_port: 0,
+        ..Default::default()
     };
+    let port = crate::block_on(state.stt.ensure(app, &settings))
+        .map_err(|e| anyhow::anyhow!("STT: запуск движка: {e}"))?;
+    log::info!("STT: CrispASR parakeet на порту {port}");
 
     let t_stt = Instant::now();
-    let mut subtitle_chunks: Vec<SubtitleChunk> = Vec::new();
-    const BATCH_SIZE: usize = 16;
+    let tmp_seg = std::env::temp_dir().join("dubvidtra_stt_segment.wav");
+    let tmp_str = tmp_seg.to_string_lossy().to_string();
 
-    let n_batches = (segments.len() + BATCH_SIZE - 1) / BATCH_SIZE;
-    let log_step = (n_batches / 10).max(1);
+    // OCR-аналог: no speaker per chunk до назначения ниже.
+    let subtitle_chunks = (|| -> Result<Vec<SubtitleChunk>> {
+        let mut chunks: Vec<SubtitleChunk> = Vec::new();
+        for (i, seg) in segments.iter().enumerate() {
+            if crate::is_cancelled() {
+                log::info!("STT: отменено, останов после текущей пачки");
+                break;
+            }
+            let start = (seg.start_sec * sample_rate as f64) as usize;
+            let end = ((seg.end_sec * sample_rate as f64) as usize).min(all_samples.len());
+            if start >= end || end - start < min_segment_samples {
+                continue;
+            }
 
-    for (batch_idx, batch_segments) in segments.chunks(BATCH_SIZE).enumerate() {
-        if batch_idx == 0 || batch_idx == n_batches - 1 || batch_idx % log_step == 0 {
-            let pct = (batch_idx + 1) * 100 / n_batches;
-            log::info!("STT: обработка {}/{} пачек ({}%)", batch_idx + 1, n_batches, pct);
-        }
+            write_segment_wav(&tmp_str, sample_rate, &all_samples[start..end])?;
 
-        let mut streams = Vec::new();
-        let mut valid_segments = Vec::new();
-
-        for seg in batch_segments {
-            let start_sample = (seg.start_sec * sample_rate as f64) as usize;
-            let end_sample = (seg.end_sec * sample_rate as f64).min(all_samples.len() as f64) as usize;
-
-            if start_sample >= end_sample { continue; }
-            let seg_samples = &all_samples[start_sample..end_sample];
-            if seg_samples.is_empty() { continue; }
-
-            let stream = recognizer.create_stream();
-            if stt_model == "qwen3-asr" { stream.set_option("language", "English"); }
-            stream.accept_waveform(sample_rate, seg_samples);
-
-            streams.push(stream);
-            valid_segments.push(seg);
-        }
-
-        if streams.is_empty() { continue; }
-
-        let stream_refs: Vec<&sherpa_onnx::OfflineStream> = streams.iter().collect();
-        recognizer.decode_multiple_streams(&stream_refs);
-
-        for (offset, seg) in valid_segments.into_iter().enumerate() {
-            if let Some(r) = streams[offset].get_result() {
-                let clean = if stt_model == "qwen3-asr" { parse_qwen3asr(&r.text) } else { parse_text(&r.text) };
-
-                if !clean.is_empty() {
-                    subtitle_chunks.push(SubtitleChunk {
-                        start_sec: seg.start_sec,
-                        end_sec: seg.end_sec,
-                        text: clean,
-                        speaker_id: None,
-                        word_timestamps: None,
-                    });
+            let text = match crate::block_on(state.stt.transcribe(&tmp_str, "en")) {
+                Ok(t) => t,
+                Err(e) if e.contains("пустой текст") => {
+                    log::warn!(
+                        "STT: сегмент {:.1}–{:.1}с — пустая транскрипция, пропускаем",
+                        seg.start_sec,
+                        seg.end_sec
+                    );
+                    String::new()
                 }
+                Err(e) => return Err(anyhow::anyhow!("STT: распознавание сегмента: {e}")),
+            };
+            if !text.is_empty() {
+                chunks.push(SubtitleChunk {
+                    start_sec: seg.start_sec,
+                    end_sec: seg.end_sec,
+                    text,
+                    speaker_id: None,
+                    word_timestamps: None,
+                });
+            }
+
+            if (i + 1) % 10 == 0 || i + 1 == segments.len() {
+                log::info!("STT: {}/{} сегментов, распознано {}", i + 1, segments.len(), chunks.len());
             }
         }
-    }
+        Ok(chunks)
+    })();
+
+    let subtitle_chunks = subtitle_chunks?;
+    crate::block_on(state.stt.stop(app));
+    log::info!("STT: движок остановлен");
 
     let mut final_chunks = split_long_chunks(subtitle_chunks);
 
@@ -525,35 +491,4 @@ mod tests {
         let result = split_long_chunks(chunks);
         assert!(result.is_empty());
     }
-}
-
-fn parse_qwen3asr(text: &str) -> String {
-    if text.is_empty() { return String::new(); }
-    if let Some(start) = text.find("<asr_text>") {
-        let after = &text[start + "<asr_text>".len()..];
-        if let Some(end) = after.find("</asr_text>") {
-            return after[..end].trim().to_string();
-        }
-        return after.trim().to_string();
-    }
-
-    let mut trimmed = text.trim();
-    let lower = trimmed.to_lowercase();
-
-    // Спасаем текст: если модель забыла теги, но написала "language English [текст]"
-    if lower.starts_with("language ") {
-        if let Some(space_idx) = trimmed[9..].find(' ') {
-            trimmed = trimmed[9 + space_idx..].trim();
-            trimmed = trimmed.trim_start_matches(|c: char| !c.is_alphabetic());
-        } else {
-            return String::new(); // Это просто тег языка без самого текста
-        }
-    }
-
-    trimmed.to_string()
-}
-
-/// Парсит обычный текстовый вывод (для Parakeet TDT и других моделей).
-fn parse_text(text: &str) -> String {
-    text.trim().to_string()
 }

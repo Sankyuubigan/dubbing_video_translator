@@ -3,9 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
+import Settings from "./Settings";
 
 type Stage = "idle" | "select" | "processing" | "done" | "error";
-type Tab = "main" | "logs";
+type Tab = "main" | "logs" | "settings";
 
 interface LogEntry {
   level: string;
@@ -119,7 +120,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!ggufPath) return;
     const timer = setTimeout(() => {
       invoke("save_config", {
         cfg: {
@@ -157,7 +157,7 @@ export default function App() {
       return;
     }
     if (!sherpaOnnxDir) {
-      setError("Выберите папку с Sherpa-ONNX моделью ASR");
+      setError("Не выбрана модель ASR. Откройте вкладку Настройки.");
       return;
     }
     setStage("processing");
@@ -201,6 +201,12 @@ export default function App() {
         >
           Логи
         </button>
+        <button
+          className={"tab" + (activeTab === "settings" ? " tab-active" : "")}
+          onClick={() => setActiveTab("settings")}
+        >
+          Настройки
+        </button>
       </div>
 
       {activeTab === "main" && (
@@ -235,72 +241,6 @@ export default function App() {
               </div>
             </div>
           )}
-
-          <div className="card">
-            <label>Модель ASR</label>
-            <select
-              className="select"
-              value={sttModel}
-              onChange={(e) => setSttModel(e.target.value)}
-            >
-              <option value="qwen3-asr">Qwen3-ASR (мультиязычный)</option>
-              <option value="parakeet-tdt">Parakeet TDT (английский, быстрый)</option>
-            </select>
-          </div>
-
-          <div className="card">
-            <label>Папка с моделью ASR</label>
-            <div className="file-row">
-              {sherpaOnnxDir ? (
-                <span className="file-name">
-                  {sherpaOnnxDir.split("\\").pop()?.split("/").pop()}
-                </span>
-              ) : (
-                <span className="file-name dim">Не выбрана</span>
-              )}
-              <button className="btn-secondary" onClick={async () => {
-                const file = await open({
-                  multiple: false,
-                  directory: true,
-                });
-                if (file) setSherpaOnnxDir(file);
-              }}>
-                Выбрать
-              </button>
-              {sherpaOnnxDir && (
-                <button className="btn-secondary" onClick={() => setSherpaOnnxDir("")}>
-                  Сбросить
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className="card">
-            <label>FFmpeg (оставьте пустым для auto-поиска)</label>
-            <div className="file-row">
-              {ffmpegPath ? (
-                <span className="file-name">
-                  {ffmpegPath.split("\\").pop()?.split("/").pop()}
-                </span>
-              ) : (
-                <span className="file-name dim">Auto (PATH / рядом с exe)</span>
-              )}
-              <button className="btn-secondary" onClick={async () => {
-                const file = await open({
-                  multiple: false,
-                  filters: [{ name: "FFmpeg", extensions: ["exe"] }],
-                });
-                if (file) setFfmpegPath(file);
-              }}>
-                Выбрать
-              </button>
-              {ffmpegPath && (
-                <button className="btn-secondary" onClick={() => setFfmpegPath("")}>
-                  Сбросить
-                </button>
-              )}
-            </div>
-          </div>
 
           <div className="card">
             <label>Модель перевода (GGUF)</label>
@@ -439,6 +379,17 @@ export default function App() {
             </div>
           )}
         </>
+      )}
+
+      {activeTab === "settings" && (
+        <Settings
+          sttModel={sttModel}
+          setSttModel={setSttModel}
+          sherpaOnnxDir={sherpaOnnxDir}
+          setSherpaOnnxDir={setSherpaOnnxDir}
+          ffmpegPath={ffmpegPath}
+          setFfmpegPath={setFfmpegPath}
+        />
       )}
 
       {activeTab === "logs" && (

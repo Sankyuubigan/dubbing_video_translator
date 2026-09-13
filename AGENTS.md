@@ -1,4 +1,4 @@
-# DubVidTra2 Documentation
+# Documentation
 
 ## Stack
 - **Backend:** Rust + Tauri 2.0, `llama-cpp-2` v0.1.146 (CUDA), `sherpa-onnx` v1.13.2
@@ -18,8 +18,6 @@ Pipeline order (DON'T CHANGE):
 5. translation — LLM translation (Gemma-4-12B GGUF via llama-cpp-2)
 6. output — burn subtitles into video via FFmpeg
 ```
-
-Models are loaded one at a time and dropped before the next (VRAM safety).
 
 ## Translation Module (`src-tauri/src/translation/mod.rs`)
 
@@ -95,12 +93,6 @@ EN: source text<turn|>
 
 ## Testing
 
-### Environment quirks (Windows)
-1. **MSVC required** — `llama-cpp-sys-2` needs `cl.exe`. Call `vcvarsall.bat` first.
-2. **sccache broken** — `~/.cargo/config.toml` has `rustc-wrapper = "sccache"` which fails. Must override with `RUSTC_WRAPPER=` + `--config "rustc-wrapper = ''"` in cargo.
-3. **MSVC env only in cmd.exe** — PowerShell loses env vars after batch files. Always test via `.bat`.
-4. **`cargo test --lib` crashes** with `0xc000007b` (DLL path issue in debug). Use release binary instead.
-
 ### Commands
 
 ```batch
@@ -138,8 +130,6 @@ Fields: `gguf_model_path`, `sherpa_onnx_dir`, `stt_model`, `ffmpeg_path`, `vad_t
 ## Known Issues
 - Occasional STT errors not corrected (e.g., "sea" → "море" instead of "sight" → "зрелище") — 12B model limitation
 - "spотыкалась" instead of "соскальзывал" for "slipped" context — model doesn't infer the tube top slip meaning
-- `cargo test --lib` crashes at runtime due to DLL search path in debug mode
-- sccache wrapper in global cargo config breaks C++ builds
 - CoT occasionally produces "thought: ..." prefix instead of proper `<|channel>thought` format — handled by `clean_output`
 
 ## Relevant Source Files

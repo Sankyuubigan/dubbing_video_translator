@@ -9,7 +9,7 @@
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
-  "app": {
+"app": {
     "windows": [
       {
         "title": "DubVidTra2",
@@ -23,8 +23,17 @@
       "csp": null
     }
   },
-  "bundle": {
-"active": false,
+  "plugins": {
+    "speech": {
+      "default_engine_dir": "D:\\nn\\crispasr",
+      "default_models_dir": "D:\\nn\\models\\tts"
+    }
+  },
+"bundle": {
+    "active": false,
+    "resources": [
+      "speech_models.json"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -1,9 +1,6 @@
 use std::path::PathBuf;
 
 fn main() {
-    app_lib::truncate_logs();
-    app_lib::setup_logger();
-
     let args: Vec<String> = std::env::args().collect();
     let video_path = parse_arg(&args, "--video")
         .or_else(|| parse_arg(&args, "-v"))
@@ -33,61 +30,26 @@ fn main() {
             }
         }
         None => {
-            eprintln!("Usage: test-pipeline --video <path>");
+            eprintln!("Usage: test-pipeline --video <path> [--dub]");
             eprintln!("       (defaults to test/for_test.mp4 in project root)");
             std::process::exit(1);
         }
     };
 
-    log::info!("test-pipeline: video = {}", video);
+    let enable_dubbing = args.iter().any(|a| a == "--dub");
+    log::info!("test-pipeline: video = {}, dub = {}", video, enable_dubbing);
 
     let cfg = app_lib::config::load();
-    let sherpa_dir = cfg.sherpa_onnx_dir.clone().unwrap_or_default();
-    let translate = cfg.gguf_model_path.clone().unwrap_or_default();
-
-    if sherpa_dir.is_empty() && !cfg.stt_model.as_deref().unwrap_or("").contains("qwen") {
-        log::error!("Missing sherpa_onnx_dir in config");
-        std::process::exit(1);
-    }
-    if translate.is_empty() {
+    if cfg.gguf_model_path.as_deref().unwrap_or("").is_empty() {
         log::error!("Missing gguf_model_path in config");
         std::process::exit(1);
     }
 
-    let pcfg = app_lib::comm::PipelineConfig {
-        input_path: video,
-        output_format: "mp4".to_string(),
-        gguf_model_path: Some(translate),
-        ffmpeg_path: cfg.ffmpeg_path.clone(),
-        vad_threshold_db: cfg.vad_threshold_db.clone(),
-        sherpa_onnx_dir: cfg.sherpa_onnx_dir.clone(),
-        stt_model: cfg.stt_model.clone(),
-        diarization_threshold: cfg.diarization_threshold,
-        diarization_num_speakers: cfg.diarization_num_speakers,
-        enable_dubbing: false,
-        mix_volume: cfg.mix_volume,
-    };
-    let ctx = app_lib::comm::PipelineContext::new(pcfg);
+    eprintln!("test-pipeline: headless (dub={})", enable_dubbing);
+    let code = app_lib::run_headless(video, enable_dubbing);
 
-    log::info!("test-pipeline: running...");
-    let result = app_lib::pipeline::run(ctx);
-
-    match result {
-        Ok(res) => {
-            let out = res.output_path.unwrap_or_default();
-            log::info!("test-pipeline: SUCCESS output={}", out);
-            eprintln!("\n=== SUCCESS ===");
-            eprintln!("Output: {}", out);
-            std::process::exit(0);
-        }
-        Err(e) => {
-            let err_msg = format!("{:#}", e);
-            log::error!("test-pipeline: {}", err_msg);
-            eprintln!("\n=== ERROR ===");
-            eprintln!("{}", err_msg);
-            std::process::exit(1);
-        }
-    }
+    eprintln!("\n=== EXIT CODE {} ===", code);
+    std::process::exit(code);
 }
 
 fn parse_arg(args: &[String], name: &str) -> Option<String> {
