@@ -24,7 +24,7 @@ fn resolve_input_path(path: &str) -> String {
 
 pub fn extract(ctx: PipelineContext) -> Result<PipelineContext> {
     let input = resolve_input_path(&ctx.config.input_path);
-    let wav_path = crate::paths::temp_file("dubvidtra_audio.wav");
+    let wav_path = crate::paths::temp_file("deedub_audio.wav");
     let wav_str = wav_path.to_string_lossy().to_string();
 
     log::info!("Извлекаем аудио из: {}", input);

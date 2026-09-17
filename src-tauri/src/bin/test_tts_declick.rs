@@ -1,6 +1,6 @@
 //! Регресс-тест деклика на РЕАЛЬНЫХ фикстурах (test/tts_declick_fixtures/).
 //!
-//! Фикстуры — это файлы temp/dubvidtra_tts_final_<N>.wav из последнего прогона:
+//! Фикстуры — это файлы temp/deedub_tts_final_<N>.wav из последнего прогона:
 //! сигнал ПОСЛЕ stretch+resample (44.1k), ДО declick_spikes. Идеальные входы
 //! для теста: никакой зависимости от ffmpeg/rubberband.
 //!
@@ -83,7 +83,7 @@ fn main() {
         };
         let orig: Vec<f32> = i16s.iter().map(|&s| s as f32 / 32768.0).collect();
         let mut cleaned = orig.clone();
-        app_lib::tts::declick_spikes(&mut cleaned);
+        deedub_lib::tts::declick_spikes(&mut cleaned);
 
         if fx.is_control {
             let n_changed = orig

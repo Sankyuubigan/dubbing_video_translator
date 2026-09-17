@@ -33,7 +33,7 @@ set "PATH=%USERPROFILE%\.cargo\bin;%USERPROFILE%\.rustup\toolchains\stable-x86_6
 cd /d "%PROJ%src-tauri"
 
 REM Keep raw/stretched/final WAV for ASR audit
-set DUBVID_KEEP_TTS_WAV=1
+set DEEDUB_KEEP_TTS_WAV=1
 
 echo Running pipeline...
 cargo run --bin test-pipeline --release -- --video test/test_TTS_dubbing.mp4 --dub

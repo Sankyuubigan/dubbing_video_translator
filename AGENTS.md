@@ -113,7 +113,7 @@ EN: source text<turn|>
 - **Файл LLM:** `D:\nn\models\tts\cosyvoice3-tts-rl\cosyvoice3-llm-rl-q4_k.gguf` (~366 МБ)
 - **Прочее (общие GGUF в той же папке):** flow-q8_0 + campplus-f16 + s3tok-f16 + hift-f16 + voices.gguf
 - Base-версия `cosyvoice3-tts` (т.е. `cosyvoice3-llm-q4_k.gguf`) УДАЛЕНА с диска и из `speech_models.json` — она глючила (обрезание финальных слогов в cross-lingual режиме). RL-постобучение стабильнее: на тесте 38 чанков обрезаний нет.
-- Выбор модели: env `DUBVID_TTS_PRESET` (приоритет, для headless A/B) → `tts_settings.json` → `preset` → дефолт `cosyvoice3-tts-rl`.
+- Выбор модели: env `DEEDUB_TTS_PRESET` (приоритет, для headless A/B) → `tts_settings.json` → `preset` → дефолт `cosyvoice3-tts-rl`.
 - **Пресеты — ЕДИНЫЙ источник: `tauri-plugin-speech/speech_models.json`.** Плагин подключается через path-зависимость (`Cargo.toml:42`), его `include_str!` компилируется из этой папки при каждой сборке. `src-tauri/speech_models.json` УДАЛЁН (и из `tauri.conf.json` resources тоже) — внешний файл рядом с exe больше не создаётся. Любая правка пресетов делается только в плагине (`D:\Projects\my-tauri-plugins\tauri-plugin-speech\speech_models.json`).
 
 ### Retry-костыль и declick (только для base `cosyvoice3-tts`)
@@ -139,7 +139,7 @@ Read-only диагностика: `node ..\my-tauri-plugins\tauri-build-toolkit\
 ### Commands
 
 ```batch
-REM Dev-сборка: prep (бамп версии + npm install + иконки) + tauri build без бандла + запуск app.exe
+REM Dev-сборка: prep (бамп версии + npm install + иконки) + tauri build без бандла + запуск deedub.exe
 build.bat
 
 REM Unit-тесты: cargo test [фильтр] (компиляция+прогон; харнесс на этой машине часто падает на CUDA DLL)
@@ -170,13 +170,13 @@ build_test_retry.bat
 ### Batch files
 | File | Purpose |
 |------|---------|
-| `build.bat` | Toolkit: dev build (`prep` + `npx tauri build` без бандла + запуск `app.exe`) |
+| `build.bat` | Toolkit: dev build (`prep` + `npx tauri build` без бандла + запуск `deedub.exe`) |
 | `test.bat` | Toolkit: `cargo test [фильтр]` (компиляция + прогон unit-тестов) |
 | `generate_installer.bat` | Toolkit: сборка NSIS-установщика + верификация `.sig` |
 | `release.bat` | Toolkit: полный релиз (build + sign + `gh release` + `latest.json` + commit/push) |
 | `.build-config.json` | Конфиг тулкита (repo, appExe, productName, signing, ...) |
 | `run_pipeline.bat` | Full pipeline test (no dubbing) |
-| `run_tts_pipeline.bat` | Full pipeline with TTS dubbing, keeps raw/stretched/final WAVs (`DUBVID_KEEP_TTS_WAV=1`) |
+| `run_tts_pipeline.bat` | Full pipeline with TTS dubbing, keeps raw/stretched/final WAVs (`DEEDUB_KEEP_TTS_WAV=1`) |
 | `build_test_pipeline.bat` | Compile `test-pipeline` binary |
 | `build_test_declick.bat` | Build+run `test-tts-declick`: red test for base-костыля click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
 | `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
@@ -189,14 +189,14 @@ build_test_retry.bat
 
 ### Output files (проектные папки, core §1.2)
 - Video with subtitles: `test/<name>_subbed.mp4` (рядом с исходником)
-- Dubbed WAV: `temp/dubvidtra_dubbed.wav`
-- Per-chunk raw/stretched/final WAV: `temp/dubvidtra_tts_{raw,stretched,final}_<N>.wav`
-- English SRT: `temp/dubvidtra_subtitles_en.srt`
-- Russian SRT: `temp/dubvidtra_subtitles_ru.srt`
+- Dubbed WAV: `temp/deedub_dubbed.wav`
+- Per-chunk raw/stretched/final WAV: `temp/deedub_tts_{raw,stretched,final}_<N>.wav`
+- English SRT: `temp/deedub_subtitles_en.srt`
+- Russian SRT: `temp/deedub_subtitles_ru.srt`
 - Session log: `test/last_logs`
 
 ## Config
-File: `~/.dubvidtra2/config.toml`
+File: `~/.deedub/config.toml`
 Fields: `gguf_model_path`, `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`
 
 ## Known Issues

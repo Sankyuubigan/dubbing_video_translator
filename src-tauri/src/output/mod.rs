@@ -178,7 +178,7 @@ fn run_ffmpeg_mux_with_dub(
 }
 
 fn write_srt(chunks: &[SubtitleChunk], suffix: &str) -> Result<String> {
-    let srt_path = crate::paths::temp_file(&format!("dubvidtra_subtitles_{}.srt", suffix))
+    let srt_path = crate::paths::temp_file(&format!("deedub_subtitles_{}.srt", suffix))
         .to_string_lossy()
         .to_string();
 

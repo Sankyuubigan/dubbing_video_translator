@@ -642,9 +642,9 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
     };
     let engine_exe = crate::pick_engine_exe().map_err(|e| anyhow::anyhow!(e))?;
 
-    // Выбранная TTS-модель: env `DUBVID_TTS_PRESET` (headless-прогоны/A-B), иначе
+    // Выбранная TTS-модель: env `DEEDUB_TTS_PRESET` (headless-прогоны/A-B), иначе
     // сохранённый пресет в настройках, иначе cosyvoice3-tts-rl (стабильная RL).
-    let preset_id = std::env::var("DUBVID_TTS_PRESET")
+    let preset_id = std::env::var("DEEDUB_TTS_PRESET")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
@@ -717,13 +717,13 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
                     anyhow::bail!("TTS: пустой референс для {}", speaker_id);
                 }
                 let safe = safe_speaker(speaker_id);
-                let ref16 = tmp_dir.join(format!("dubvidtra_tts_ref_{}.wav", safe));
+                let ref16 = tmp_dir.join(format!("deedub_tts_ref_{}.wav", safe));
                 write_segment_wav(
                     &ref16.to_string_lossy(),
                     src_sr,
                     &src_samples[start..end],
                 )?;
-                let ref24 = tmp_dir.join(format!("dubvidtra_tts_ref_{}_24k.wav", safe));
+                let ref24 = tmp_dir.join(format!("deedub_tts_ref_{}_24k.wav", safe));
                 resample_wav(
                     &ref16.to_string_lossy(),
                     &ref24.to_string_lossy(),
@@ -882,11 +882,11 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
         };
         let idx = p.index;
 
-        let raw_wav = tmp_dir.join(format!("dubvidtra_tts_raw_{}.wav", idx));
+        let raw_wav = tmp_dir.join(format!("deedub_tts_raw_{}.wav", idx));
         std::fs::write(&raw_wav, &s.wav)
             .with_context(|| format!("TTS: запись raw WAV {}", raw_wav.display()))?;
 
-        let stretched_wav = tmp_dir.join(format!("dubvidtra_tts_stretched_{}.wav", idx));
+        let stretched_wav = tmp_dir.join(format!("deedub_tts_stretched_{}.wav", idx));
         if p.stretch_ratio > 1.02 {
             time_stretch_wav(
                 &raw_wav.to_string_lossy(),
@@ -899,7 +899,7 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
             std::fs::copy(&raw_wav, &stretched_wav).ok();
         }
 
-        let resampled_wav = tmp_dir.join(format!("dubvidtra_tts_final_{}.wav", idx));
+        let resampled_wav = tmp_dir.join(format!("deedub_tts_final_{}.wav", idx));
         resample_wav(
             &stretched_wav.to_string_lossy(),
             &resampled_wav.to_string_lossy(),
@@ -964,8 +964,8 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
             p.stretch_ratio,
         );
 
-        // Чистим временные файлы чанка (диагностика: DUBVID_KEEP_TTS_WAV=1).
-        if std::env::var_os("DUBVID_KEEP_TTS_WAV").is_none() {
+        // Чистим временные файлы чанка (диагностика: DEEDUB_KEEP_TTS_WAV=1).
+        if std::env::var_os("DEEDUB_KEEP_TTS_WAV").is_none() {
             std::fs::remove_file(&raw_wav).ok();
             std::fs::remove_file(&stretched_wav).ok();
             std::fs::remove_file(&resampled_wav).ok();
@@ -975,8 +975,8 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
     // Чистим референсные WAV.
     for key in voice_map.keys() {
         let safe = safe_speaker(key);
-        std::fs::remove_file(tmp_dir.join(format!("dubvidtra_tts_ref_{}.wav", safe))).ok();
-        std::fs::remove_file(tmp_dir.join(format!("dubvidtra_tts_ref_{}_24k.wav", safe))).ok();
+        std::fs::remove_file(tmp_dir.join(format!("deedub_tts_ref_{}.wav", safe))).ok();
+        std::fs::remove_file(tmp_dir.join(format!("deedub_tts_ref_{}_24k.wav", safe))).ok();
     }
 
     // Останавливаем движок.
@@ -984,7 +984,7 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
 
     // Сохраняем финальную дорожку озвучки.
     let dubbed_path = tmp_dir
-        .join("dubvidtra_dubbed.wav")
+        .join("deedub_dubbed.wav")
         .to_string_lossy()
         .to_string();
     {

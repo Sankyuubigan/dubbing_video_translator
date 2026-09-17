@@ -1,8 +1,9 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "dubvidtra2",
+"productName": "DeeDub",
+  "mainBinaryName": "deedub",
   "version": "26.9.1",
-  "identifier": "com.dubvidtra2.desktop",
+  "identifier": "com.deedub.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +13,7 @@
 "app": {
     "windows": [
       {
-        "title": "DubVidTra2",
+        "title": "DeeDub",
         "width": 800,
         "height": 600,
         "resizable": true,

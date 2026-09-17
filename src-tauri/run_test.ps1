@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $TestVideo = if ($Video) { $Video } else { Join-Path $ProjectRoot "for_test.mp4" }
 
-Write-Host "=== DubVidTra2 Test Runner ===" -ForegroundColor Cyan
+Write-Host "=== DeeDub Test Runner ===" -ForegroundColor Cyan
 Write-Host ""
 
 if ($AudioOnly) {
@@ -57,7 +57,7 @@ if (Test-Path $TestVideo) {
 }
 
 # Check config
-$ConfigPath = Join-Path $env:USERPROFILE ".dubvidtra2" "config.toml"
+$ConfigPath = Join-Path $env:USERPROFILE ".deedub" "config.toml"
 if (Test-Path $ConfigPath) {
     Write-Host "Config found: $ConfigPath" -ForegroundColor Green
     Get-Content $ConfigPath
@@ -74,7 +74,7 @@ Write-Host "=== To run the full pipeline in GUI mode: ===" -ForegroundColor Cyan
 Write-Host "  cd src-tauri && cargo tauri dev" -ForegroundColor White
 Write-Host ""
 Write-Host "=== To run with auto-test (pipeline runs on app start, ОТКРЫВАЕТ ОКНО): ===" -ForegroundColor Yellow
-Write-Host '  $env:DUBVID_TEST_VIDEO = "path\to\video.mp4"' -ForegroundColor White
+Write-Host '  $env:DEEDUB_TEST_VIDEO = "path\to\video.mp4"' -ForegroundColor White
 Write-Host "  cd src-tauri && cargo tauri dev" -ForegroundColor White
 Write-Host "  ВНИМАНИЕ: открывает Tauri окно с ERR_CONNECTION_REFUSED, не закрывать пока не завершится"
 Write-Host ""

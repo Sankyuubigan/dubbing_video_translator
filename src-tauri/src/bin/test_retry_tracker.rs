@@ -14,7 +14,7 @@
 //! запускается (STATUS_ENTRYPOINT_NOT_FOUND — CUDA DLL при загрузке), а
 //! автономные [[bin]] бинари работают.
 
-use app_lib::tts::RetryTracker;
+use deedub_lib::tts::RetryTracker;
 
 /// Прогоняет tracker по реальным длинам попыток и возвращает
 /// (лучшая длина, число попыток до stop).

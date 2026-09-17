@@ -28,7 +28,7 @@ impl Default for AppConfig {
 
 pub fn config_path() -> PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push(".dubvidtra2");
+    path.push(".deedub");
     path
 }
 

@@ -192,7 +192,7 @@ export default function App() {
 
       {activeTab === "main" && (
         <>
-          <h1>DubVidTra2</h1>
+          <h1>DeeDub</h1>
           <p className="subtitle">Локальный перевод видео с субтитрами</p>
 
           {stage === "idle" && (

@@ -65,30 +65,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb5dfbc6d8d2675589ccbe4d0fd61df2419075625f8c1a62325e718e2b0049f9"
 
 [[package]]
-name = "app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "encoding_rs",
- "hound",
- "llama-cpp-2",
- "log",
- "regex",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-process",
- "tauri-plugin-speech",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.2",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -921,6 +897,30 @@ dependencies = [
  "libc",
  "libdbus-sys",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "deedub"
+version = "26.9.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "encoding_rs",
+ "hound",
+ "llama-cpp-2",
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-process",
+ "tauri-plugin-speech",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.2",
 ]
 
 [[package]]

@@ -144,18 +144,18 @@ pub fn pick_engine_exe() -> Result<String, String> {
 }
 
 /// Ищет GGUF-модель STT. Приоритет:
-/// 1. env `DUBVID_STT_MODEL` (явный путь);
+/// 1. env `DEEDUB_STT_MODEL` (явный путь);
 /// 2. известные пути в `D:\nn\models\stt`;
 /// 3. поиск по `D:\nn\models\stt` с предпочтением имени "parakeet".
 pub fn resolve_stt_model() -> Result<String, String> {
-    if let Ok(p) = std::env::var("DUBVID_STT_MODEL") {
+    if let Ok(p) = std::env::var("DEEDUB_STT_MODEL") {
         if !p.is_empty() {
             if std::path::Path::new(&p).exists() {
-                log::info!("STT: модель из DUBVID_STT_MODEL: {p}");
+                log::info!("STT: модель из DEEDUB_STT_MODEL: {p}");
                 return Ok(p);
             }
             return Err(format!(
-                "STT: DUBVID_STT_MODEL задан, но файл не существует: {p}"
+                "STT: DEEDUB_STT_MODEL задан, но файл не существует: {p}"
             ));
         }
     }
@@ -181,7 +181,7 @@ pub fn resolve_stt_model() -> Result<String, String> {
     }
 
     Err("STT: GGUF-модель не найдена. Скачайте parakeet-tdt-0.6b-v3-q4_k.gguf \
-         в D:/nn/models/stt (или укажите DUBVID_STT_MODEL)".to_string())
+         в D:/nn/models/stt (или укажите DEEDUB_STT_MODEL)".to_string())
 }
 
 /// Одноуровневый поиск GGUF под `root`; файлы, чьё имя содержит `prefer`, берутся первыми.
@@ -476,7 +476,7 @@ pub fn setup_logger() {
     // (в translation/mod.rs есть log::debug!) — иначе лог молча теряется (core §2.5).
     log::set_max_level(LevelFilter::Debug);
 
-    log::info!("=== DubVidTra2 Start ===");
+    log::info!("=== DeeDub Start ===");
     log::info!("Log file: {}", log_file().display());
 }
 
@@ -584,7 +584,7 @@ pub fn run() {
             log::info!("=== App initialized ===");
 
             let app_handle = app.handle().clone();
-            if let Ok(video) = std::env::var("DUBVID_TEST_VIDEO") {
+            if let Ok(video) = std::env::var("DEEDUB_TEST_VIDEO") {
                 if !video.is_empty() {
                     log::info!("=== AUTO: starting pipeline with {}", video);
                     spawn_pipeline_thread(app_handle, video, false);

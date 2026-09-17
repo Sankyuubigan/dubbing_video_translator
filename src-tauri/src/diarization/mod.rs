@@ -281,7 +281,7 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
         }
     };
 
-    let prefix = crate::paths::temp_file(&format!("dubvidtra_diar_{}", std::process::id()));
+    let prefix = crate::paths::temp_file(&format!("deedub_diar_{}", std::process::id()));
     let json_path = prefix.with_extension("json");
     let stderr_log = prefix.with_extension("log");
 

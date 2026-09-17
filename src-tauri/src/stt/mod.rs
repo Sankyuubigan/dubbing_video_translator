@@ -113,7 +113,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     log::info!("STT: CrispASR parakeet на порту {port}");
 
     let t_stt = Instant::now();
-    let tmp_seg = crate::paths::temp_file("dubvidtra_stt_segment.wav");
+    let tmp_seg = crate::paths::temp_file("deedub_stt_segment.wav");
     let tmp_str = tmp_seg.to_string_lossy().to_string();
 
     // OCR-аналог: no speaker per chunk до назначения ниже.
