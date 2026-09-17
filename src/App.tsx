@@ -24,10 +24,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("main");
   const [videoPath, setVideoPath] = useState<string>("");
   const [ggufPath, setGgufPath] = useState<string>("");
-  const [sherpaOnnxDir, setSherpaOnnxDir] = useState<string>("");
-  const [sttModel, setSttModel] = useState<string>("qwen3-asr");
   const [ffmpegPath, setFfmpegPath] = useState<string>("");
-  const [vadThreshold, setVadThreshold] = useState<string>("-40");
   const [format, setFormat] = useState<string>("mp4");
   const [enableDubbing, setEnableDubbing] = useState<boolean>(false);
   const [mixVolume, setMixVolume] = useState<number>(15);
@@ -100,9 +97,6 @@ export default function App() {
       gguf_model_path: string | null;
       ffmpeg_path: string | null;
       output_format: string;
-      vad_threshold_db: string | null;
-      sherpa_onnx_dir: string | null;
-      stt_model: string | null;
       enable_dubbing: boolean;
       mix_volume: number;
     }>("get_config")
@@ -110,9 +104,6 @@ export default function App() {
         if (cfg.gguf_model_path) setGgufPath(cfg.gguf_model_path);
         if (cfg.ffmpeg_path) setFfmpegPath(cfg.ffmpeg_path);
         if (cfg.output_format) setFormat(cfg.output_format);
-        if (cfg.vad_threshold_db) setVadThreshold(cfg.vad_threshold_db);
-        if (cfg.sherpa_onnx_dir) setSherpaOnnxDir(cfg.sherpa_onnx_dir);
-        if (cfg.stt_model) setSttModel(cfg.stt_model);
         setEnableDubbing(cfg.enable_dubbing);
         setMixVolume(Math.round(cfg.mix_volume * 100));
       })
@@ -126,16 +117,13 @@ export default function App() {
           gguf_model_path: ggufPath || null,
           ffmpeg_path: ffmpegPath || null,
           output_format: format,
-          vad_threshold_db: vadThreshold || null,
-          sherpa_onnx_dir: sherpaOnnxDir || null,
-          stt_model: sttModel || null,
           enable_dubbing: enableDubbing,
           mix_volume: mixVolume / 100,
         },
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ggufPath, ffmpegPath, format, vadThreshold, sherpaOnnxDir, sttModel, enableDubbing, mixVolume]);
+  }, [ggufPath, ffmpegPath, format, enableDubbing, mixVolume]);
 
   const handleSelectVideo = async () => {
     const file = await open({
@@ -156,10 +144,6 @@ export default function App() {
       setError("Выберите GGUF-файл модели перевода");
       return;
     }
-    if (!sherpaOnnxDir) {
-      setError("Не выбрана модель ASR. Откройте вкладку Настройки.");
-      return;
-    }
     setStage("processing");
     setProgress(0);
     setProgressStage("start");
@@ -170,9 +154,6 @@ export default function App() {
       inputPath: videoPath,
       ggufModelPath: ggufPath,
       outputFormat: format,
-      vadThresholdDb: vadThreshold || null,
-      sherpaOnnxDir: sherpaOnnxDir || null,
-      sttModel: sttModel,
       enableDubbing: enableDubbing,
     }).catch((e) => {
       setError(String(e));
@@ -261,19 +242,6 @@ export default function App() {
               }}>
                 Выбрать
               </button>
-            </div>
-          </div>
-
-          <div className="card">
-            <label>VAD порог (dB, тише = меньше ложных срабатываний)</label>
-            <div className="file-row">
-              <input
-                className="input-text"
-                type="text"
-                value={vadThreshold}
-                onChange={(e) => setVadThreshold(e.target.value)}
-                placeholder="-30"
-              />
             </div>
           </div>
 
@@ -383,10 +351,6 @@ export default function App() {
 
       {activeTab === "settings" && (
         <Settings
-          sttModel={sttModel}
-          setSttModel={setSttModel}
-          sherpaOnnxDir={sherpaOnnxDir}
-          setSherpaOnnxDir={setSherpaOnnxDir}
           ffmpegPath={ffmpegPath}
           setFfmpegPath={setFfmpegPath}
         />

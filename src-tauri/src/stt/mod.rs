@@ -52,17 +52,13 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     };
 
     // ПРОФЕССИОНАЛЬНЫЙ ПАЙПЛАЙН: сегменты диаризации — источник истины.
-    // Каждый кусок аудио содержит ровно одного спикера. Если диаризации нет —
-    // откат на VAD.
-    let base_segments = if let Some(speakers) = ctx.speaker_segments.as_ref() {
-        speakers.iter().map(|s| TimeSegment {
+    // Диаризация (CrispASR) — единственный источник сегментов; без неё пайплайн упал раньше.
+    let base_segments: Vec<TimeSegment> = match ctx.speaker_segments.as_ref() {
+        Some(speakers) => speakers.iter().map(|s| TimeSegment {
             start_sec: s.start_sec,
             end_sec: s.end_sec,
-        }).collect()
-    } else if let Some(vad_segs) = ctx.voice_segments.as_ref() {
-        vad_segs.clone()
-    } else {
-        anyhow::bail!("Нет ни сегментов диаризации, ни VAD");
+        }).collect(),
+        None => anyhow::bail!("Нет сегментов диаризации"),
     };
 
     // Дробим сегменты: слишком длинные куски (компрессия контекста) дают
@@ -108,7 +104,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
         backend: "parakeet".into(),
         model: model_path,
         engine_exe,
-        vad: false, // голосовую активность уже дали VAD + диаризация
+        vad: false, // голосовую активность уже определила диаризация (CrispASR)
         ws_port: 0,
         ..Default::default()
     };
@@ -117,7 +113,7 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     log::info!("STT: CrispASR parakeet на порту {port}");
 
     let t_stt = Instant::now();
-    let tmp_seg = std::env::temp_dir().join("dubvidtra_stt_segment.wav");
+    let tmp_seg = crate::paths::temp_file("dubvidtra_stt_segment.wav");
     let tmp_str = tmp_seg.to_string_lossy().to_string();
 
     // OCR-аналог: no speaker per chunk до назначения ниже.

@@ -11,6 +11,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@my-tauri-plugins/plugin-speech": "file:../my-tauri-plugins/tauri-plugin-speech",
     "@rolldown/binding-win32-x64-msvc": "^1.0.3",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",

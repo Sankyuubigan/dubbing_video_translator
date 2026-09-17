@@ -24,7 +24,7 @@ fn resolve_input_path(path: &str) -> String {
 
 pub fn extract(ctx: PipelineContext) -> Result<PipelineContext> {
     let input = resolve_input_path(&ctx.config.input_path);
-    let wav_path = std::env::temp_dir().join("dubvidtra_audio.wav");
+    let wav_path = crate::paths::temp_file("dubvidtra_audio.wav");
     let wav_str = wav_path.to_string_lossy().to_string();
 
     log::info!("Извлекаем аудио из: {}", input);
@@ -84,11 +84,6 @@ mod tests {
             output_format: "mp4".to_string(),
             gguf_model_path: None,
             ffmpeg_path: None,
-            vad_threshold_db: None,
-            sherpa_onnx_dir: None,
-            stt_model: None,
-            diarization_threshold: None,
-            diarization_num_speakers: None,
             enable_dubbing: false,
             mix_volume: 1.0,
         };

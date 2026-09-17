@@ -42,3 +42,4 @@ debug_*.txt
 # Downloaded AI models
 /models
 /research_tower_plus_9b
+/temp

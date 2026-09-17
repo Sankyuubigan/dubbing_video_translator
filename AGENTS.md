@@ -1,10 +1,25 @@
 # Documentation
 
+## ОБЯЗАТЕЛЬНО: Чтение глобальной документации (core §3.1)
+
+Перед любой работой над этим проектом ОБЯЗАТЕЛЬНО прочитать:
+
+1. `D:\Projects\docusaurus-starter\docs\Sega Mega Note\Моя картотека\software\настройки\global_ai_docs\core\rules.md` — базовые правила (универсальные, для всех проектов)
+2. `D:\Projects\docusaurus-starter\docs\Sega Mega Note\Моя картотека\software\настройки\global_ai_docs\desktop_rust_tauri\rules.md` — правила для Rust + Tauri
+
+### Ключевая выжимка, обязательная к соблюдению
+- **Git**: любые git-операции (commit/push/add/checkout/...) — ТОЛЬКО с явного письменного разрешения пользователя. Разрешены только `git diff/status/log`.
+- **Временные файлы и логи**: ТОЛЬКО в проектных папках `temp/`, `test/` или `target/`. Системный `%TEMP%` и корень репо — запрещены. Лог последней сессии — `test/last_logs` (с меткой `[ГГГГ-ММ-ДД ЧЧ:ММ:СС]Z` в каждой строке).
+- **Поиск корня бага**: запрещено чинить симптомы/костылями, только root cause. Догадка ≠ причина: проверять кодом/логами/тестами.
+- **Поиск в интернете**: только keyless-сервисы (DuckDuckGo/Wikipedia/...). Использование API-ключей (Tavily/Exa/Brave/Bing/SerpAPI) — ЗАПРЕЩЕНО (core §2.6).
+- **Крупные задачи**: обязателен план-файл в `tasks/` с именем `ДД.ММ.ГГ <название>.md` и чекбоксами (core §1.8).
+- **Сборка/тесты**: НЕ вызывать `cargo`/`npx tauri` напрямую — только через `.bat`-обёртки из папки проекта (desktop §2).
+
 ## Stack
-- **Backend:** Rust + Tauri 2.0, `llama-cpp-2` v0.1.146 (CUDA), `sherpa-onnx` v1.13.2
+- **Backend:** Rust + Tauri 2.0, `llama-cpp-2` v0.1.146 (CUDA)
 - **Frontend:** React/TypeScript
 - **Media:** FFmpeg (external, audio extraction + subtitle muxing)
-- **Models:** Silero VAD v5, PyAnnote + TitaNet (diarization), Qwen3-ASR (STT), Gemma-4-12B (translation)
+- **Models:** CrispASR (parakeet ASR + VAD + diarization), Gemma-4-12B (translation)
 
 ## Architecture
 Modules are isolated — they don't import each other directly. All communication goes through `comm.rs` (PipelineContext hub).
@@ -12,12 +27,13 @@ Modules are isolated — they don't import each other directly. All communicatio
 ```
 Pipeline order (DON'T CHANGE):
 1. audio_extractor — extract WAV from video via FFmpeg
-2. vad — Voice Activity Detection (Silero VAD v5, .onnx via sherpa-onnx)
-3. diarization — Speaker Identification (PyAnnote + TitaNet, .onnx via sherpa-onnx)
-4. stt — Speech-to-Text (Qwen3-ASR, .onnx via sherpa-onnx) with speaker-aware slicing
-5. translation — LLM translation (Gemma-4-12B GGUF via llama-cpp-2)
-6. output — burn subtitles into video via FFmpeg
+2. diarization — CrispASR one-pass: parakeet ASR + VAD + speaker diarization (returns speaker segments AND transcript)
+3. stt — takes the ready transcript from diarization (does NOT re-run the engine)
+4. translation — LLM translation (Gemma-4-12B GGUF via llama-cpp-2)
+5. output — burn subtitles into video via FFmpeg
 ```
+
+**No Silero VAD module and no sherpa-onnx fallback diarization** — CrispASR is the single source of truth for ASR+diarization. If CrispASR gives no segments, the pipeline fails with a clear error (no silent fallback).
 
 ## Translation Module (`src-tauri/src/translation/mod.rs`)
 
@@ -91,41 +107,70 @@ EN: source text<turn|>
 - **Chain of Thought** — `<|channel>thought` for internal reasoning before final answer
 - **12B params** — better STT error correction and context understanding
 
+## TTS Module (`src-tauri/src/tts/mod.rs`)
+
+### Модель по умолчанию: `cosyvoice3-tts-rl` (RL)
+- **Файл LLM:** `D:\nn\models\tts\cosyvoice3-tts-rl\cosyvoice3-llm-rl-q4_k.gguf` (~366 МБ)
+- **Прочее (общие GGUF в той же папке):** flow-q8_0 + campplus-f16 + s3tok-f16 + hift-f16 + voices.gguf
+- Base-версия `cosyvoice3-tts` (т.е. `cosyvoice3-llm-q4_k.gguf`) УДАЛЕНА с диска и из `speech_models.json` — она глючила (обрезание финальных слогов в cross-lingual режиме). RL-постобучение стабильнее: на тесте 38 чанков обрезаний нет.
+- Выбор модели: env `DUBVID_TTS_PRESET` (приоритет, для headless A/B) → `tts_settings.json` → `preset` → дефолт `cosyvoice3-tts-rl`.
+- Пресеты грузятся из `speech_models.json`: внешний рядом с exe (приоритет) → встроенная копия плагина (`include_str!`). Проектная копия: `src-tauri/speech_models.json` (кладётся в resources); плагинная: `tauri-plugin-speech/speech_models.json` (fallback).
+
+### Retry-костыль (только для base `cosyvoice3-tts`)
+- Историческая причина: base-модель в cross-lingual (EN-голос → RU-текст) выбрасывает LM reference-tokens и «обрезает» финальные слоги; RAS-семплер seed-зависим.
+- Механизм: `RetryTracker` + `TTS_RETRY_SEEDS` + `TTS_FULL_FLOOR=0.62` — повторы с разными seed, пока ДВЕ попытки не сойдутся на полноте ≥ 0.62×ожидаемой длительности (`expected_spoken_secs` по числу гласных, темп 4.4 гласных/сек).
+- **Включение строго по бэкенду:** `attempt_count = if tts_backend == "cosyvoice3-tts" { TTS_MAX_ATTEMPTS } else { 1 }`.
+- Сейчас пресета `cosyvoice3-tts` в JSON нет → костыль фактически выключен. Оставлен в коде на будущее: если base вернётся в `speech_models.json`, retry восстановится автоматически. RL синтезирует всегда 1 попыткой (seed=None).
+- Щелчки к костылю отношения не имеют: вычищаются из готовых сэмплов пост-обработкой `declick_spikes` для любой модели.
+
 ## Testing
 
 ### Commands
 
-```batch
-REM Full pipeline test (reliable)
-call "D:\Programs\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
-set RUSTC_WRAPPER=
-cd src-tauri
-cargo run --bin test-pipeline --release --config "rustc-wrapper = ''" -- --video test/for_test.mp4
-```
+Сборка/тесты выполняются ТОЛЬКО через `.bat`-обёртки (desktop §2 — прямой вызов `cargo` запрещён).
 
 ```batch
-REM Compilation check only
-call "D:\Programs\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
-set RUSTC_WRAPPER=
-cd src-tauri
-cargo test --lib --no-run --config "rustc-wrapper = ''"
+REM Полный pipeline-тест (TTS-дубляж, сохраняет raw/stretched/final WAV в temp/)
+run_tts_pipeline.bat
+
+REM Полный pipeline-тест без дубляжа
+run_pipeline.bat
+
+REM Только компиляция тест-бинаря
+build_test_pipeline.bat
+
+REM Компиляция unit-тестов (харнесс на этой машине НЕ запускается — CUDA DLL, только проверка компиляции)
+test.bat
+
+REM Деклик red-тест (бинарь, работает): клики против порога <0.20 FS
+build_test_declick.bat
+
+REM RetryTracker-тесты по всем сценариям обрезания (бинарь, работает)
+build_test_retry.bat
 ```
 
 ### Batch files
 | File | Purpose |
 |------|---------|
 | `build.bat` | Production build (npm install + cargo release + tauri bundle) |
-| `run_pipeline.bat` | Full pipeline test |
-| `test.bat` | Compilation check |
+| `run_pipeline.bat` | Full pipeline test (no dubbing) |
+| `run_tts_pipeline.bat` | Full pipeline with TTS dubbing, keeps raw/stretched/final WAVs (`DUBVID_KEEP_TTS_WAV=1`) |
+| `build_test_pipeline.bat` | Compile `test-pipeline` binary |
+| `test.bat` | Compilation check of unit tests only (harness fails to run with STATUS_ENTRYPOINT_NOT_FOUND — CUDA DLL at load, machine limitation) |
+| `build_test_declick.bat` | Build+run `test-tts-declick`: red test for click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
+| `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
 
-### Output files
-- Video with subtitles: `test/for_test_subbed.mp4`
-- English SRT: `%TEMP%\dubvidtra_subtitles_en.srt`
-- Russian SRT: `%TEMP%\dubvidtra_subtitles_ru.srt`
+### Output files (проектные папки, core §1.2)
+- Video with subtitles: `test/<name>_subbed.mp4` (рядом с исходником)
+- Dubbed WAV: `temp/dubvidtra_dubbed.wav`
+- Per-chunk raw/stretched/final WAV: `temp/dubvidtra_tts_{raw,stretched,final}_<N>.wav`
+- English SRT: `temp/dubvidtra_subtitles_en.srt`
+- Russian SRT: `temp/dubvidtra_subtitles_ru.srt`
+- Session log: `test/last_logs`
 
 ## Config
 File: `~/.dubvidtra2/config.toml`
-Fields: `gguf_model_path`, `sherpa_onnx_dir`, `stt_model`, `ffmpeg_path`, `vad_threshold_db`, `diarization_threshold`, `diarization_num_speakers`, `output_format`
+Fields: `gguf_model_path`, `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`
 
 ## Known Issues
 - Occasional STT errors not corrected (e.g., "sea" → "море" instead of "sight" → "зрелище") — 12B model limitation
@@ -141,10 +186,12 @@ Fields: `gguf_model_path`, `sherpa_onnx_dir`, `stt_model`, `ffmpeg_path`, `vad_t
 | `src-tauri/src/comm.rs` | PipelineContext, SubtitleChunk |
 | `src-tauri/src/config/mod.rs` | Config load/save |
 | `src-tauri/src/audio_extractor/mod.rs` | WAV extraction |
-| `src-tauri/src/vad/mod.rs` | Voice Activity Detection |
-| `src-tauri/src/diarization/mod.rs` | Speaker diarization |
-| `src-tauri/src/stt/mod.rs` | Speech-to-Text |
+| `src-tauri/src/diarization/mod.rs` | CrispASR ASR + speaker diarization (single source) |
+| `src-tauri/src/stt/mod.rs` | Consumes diarization transcript |
 | `src-tauri/src/output/mod.rs` | Subtitle muxing |
+| `src-tauri/src/tts/mod.rs` | TTS дubляж: синтез + retry только для base (`RetryTracker`, `TTS_FULL_FLOOR`) + declick_spikes |
+| `src-tauri/src/bin/test_retry_tracker.rs` | Автономный тест сценариев обрезания (работает на этой машине) |
+| `src-tauri/src/paths.rs` | Единый источник путей (core §1.2/§2.5.1): `temp/`, `test/`, `test/last_logs` |
 | `src-tauri/Cargo.toml` | Rust dependencies |
 
 ## Research

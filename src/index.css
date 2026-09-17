@@ -62,3 +62,16 @@ h1 {
   color: var(--text);
   margin-bottom: 8px;
 }
+
+.settings speech-engine-panel,
+.settings speech-models-panel,
+.settings speech-voice-storage {
+  --text: var(--text-h);
+  --text-muted: var(--text);
+  --border: var(--border);
+  --bg-color: var(--surface);
+  --session-hover: var(--surface-hover);
+  --primary: var(--accent);
+  --primary-hover: #7c4df0;
+  --font: var(--font);
+}

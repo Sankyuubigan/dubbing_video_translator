@@ -36,22 +36,19 @@ pub fn run(ctx: PipelineContext) -> Result<PipelineContext> {
     let ctx = timed_stage!("extract", 5.0, ctx, crate::audio_extractor::extract)
         .map_err(|e| { log::error!("[pipeline] audio_extractor: {:#}", e); e })?;
 
-    let ctx = timed_stage!("vad", 15.0, ctx, crate::vad::detect)
-        .map_err(|e| { log::error!("[pipeline] vad: {:#}", e); e })?;
-
-    let ctx = timed_stage!("diarize", 30.0, ctx, crate::diarization::diarize)
+    let ctx = timed_stage!("diarize", 20.0, ctx, crate::diarization::diarize)
         .map_err(|e| { log::error!("[pipeline] diarization: {:#}", e); e })?;
 
-    let ctx = timed_stage!("stt", 50.0, ctx, crate::stt::transcribe)
+    let ctx = timed_stage!("stt", 40.0, ctx, crate::stt::transcribe)
         .map_err(|e| { log::error!("[pipeline] stt: {:#}", e); e })?;
 
-    let ctx = timed_stage!("translate", 70.0, ctx, crate::translation::translate)
+    let ctx = timed_stage!("translate", 60.0, ctx, crate::translation::translate)
         .map_err(|e| { log::error!("[pipeline] translation: {:#}", e); e })?;
 
-    let ctx = timed_stage!("verify", 75.0, ctx, crate::verification::verify)
+    let ctx = timed_stage!("verify", 65.0, ctx, crate::verification::verify)
         .map_err(|e| { log::error!("[pipeline] verification: {:#}", e); e })?;
 
-    let ctx = timed_stage!("tts", 80.0, ctx, crate::tts::dub)
+    let ctx = timed_stage!("tts", 70.0, ctx, crate::tts::dub)
         .map_err(|e| { log::error!("[pipeline] tts: {:#}", e); e })?;
 
     let ctx = timed_stage!("mux", 90.0, ctx, crate::output::mux)

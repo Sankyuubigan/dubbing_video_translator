@@ -309,7 +309,7 @@ fn merge_interjections(chunks: &[SubtitleChunk]) -> Vec<SubtitleChunk> {
             // Merge backward into the previous chunk if close in time
             if let Some(last) = merged.last_mut() {
                 let gap = chunk.start_sec - last.end_sec;
-                if gap < 2.0 || last.speaker_id == chunk.speaker_id {
+                if (gap >= 0.0 && gap < 2.0) || last.speaker_id == chunk.speaker_id {
                     last.text.push(' ');
                     last.text.push_str(chunk.text.trim());
                     last.end_sec = chunk.end_sec;

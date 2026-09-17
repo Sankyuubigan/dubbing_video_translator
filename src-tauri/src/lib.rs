@@ -2,15 +2,14 @@ mod audio_extractor;
 pub mod comm;
 pub mod config;
 mod diarization;
-mod download;
 mod ffmpeg;
 mod llm;
 mod output;
+pub mod paths;
 pub mod pipeline;
 mod stt;
 mod translation;
-mod tts;
-mod vad;
+pub mod tts;
 mod verification;
 
 use comm::{PipelineConfig, PipelineContext, ProgressUpdate};
@@ -223,76 +222,74 @@ pub struct LogEntry {
 
 static LOG_BUF: Mutex<Vec<LogEntry>> = Mutex::new(Vec::new());
 
-fn log_paths() -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-
-    // 1) AppData/Local/dubvidtra2/last_logs.log
-    if let Some(data_dir) = dirs::data_local_dir() {
-        paths.push(data_dir.join("dubvidtra2").join("last_logs.log"));
-    }
-
-    // 2) рядом с exe
-    if let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-    {
-        paths.push(exe_dir.join("last_logs.log"));
-    }
-
-    // 3) рядом с CWD
-    if let Ok(cwd) = std::env::current_dir() {
-        if !paths.iter().any(|p| p.parent() == Some(&cwd)) {
-            paths.push(cwd.join("last_logs.log"));
-        }
-    }
-
-    // 4) Temp
-    let tmp = std::env::temp_dir().join("dubvidtra2").join("last_logs.log");
-    if !paths.contains(&tmp) {
-        paths.push(tmp);
-    }
-
-    paths
+/// Единственный файл лога последней сессии: `<root>/test/last_logs` (core §2.5.1).
+fn log_file() -> std::path::PathBuf {
+    paths::last_logs_file()
 }
 
-/// Очищает все last_logs.log при старте
+/// Очищает `test/last_logs` при старте (core §2.5.1).
 pub fn truncate_logs() {
-    for path in log_paths() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&path, "");
+    let path = log_file();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, "") {
+        eprintln!("WARN: не удалось очистить {}: {}", path.display(), e);
     }
 }
 
 fn log_to_file(msg: &str) {
-    for path in &log_paths() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)
-        {
+    let path = log_file();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
             let _ = writeln!(f, "{}", msg);
             let _ = f.flush();
         }
+        Err(e) => eprintln!("WARN: не удалось записать {}: {}", path.display(), e),
     }
 }
 
+/// Метка времени `[ГГГГ-ММ-ДД ЧЧ:ММ:ССZ]` (UTC; локальное время без внешних
+/// зависимостей недоступно — core §2.5.1 допускает UTC с суффиксом `Z`).
 fn timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let s = d.as_secs();
+        .unwrap_or_default()
+        .as_secs();
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
     format!(
-        "{:02}:{:02}:{:02}",
-        (s / 3600) % 24,
-        (s / 60) % 60,
-        s % 60
+        "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z]",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
     )
+}
+
+/// Гражданская дата из числа дней от 1970-01-01 (алгоритм Говарда Хиннанта).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 // ---- Custom Logger (file + stdout + buffer + Tauri events) ----
@@ -349,9 +346,6 @@ fn process_video(
     input_path: String,
     gguf_model_path: Option<String>,
     output_format: Option<String>,
-    vad_threshold_db: Option<String>,
-    sherpa_onnx_dir: Option<String>,
-    stt_model: Option<String>,
     enable_dubbing: Option<bool>,
     app_handle: tauri::AppHandle,
     state: tauri::State<AppState>,
@@ -362,18 +356,12 @@ fn process_video(
     };
 
     let app_cfg = state.config.lock().unwrap().clone();
-    let onnx_dir = sherpa_onnx_dir.or(app_cfg.sherpa_onnx_dir);
 
     let cfg = PipelineConfig {
         input_path,
         output_format: output_format.unwrap_or_default(),
         gguf_model_path,
         ffmpeg_path: app_cfg.ffmpeg_path.clone(),
-        vad_threshold_db,
-        sherpa_onnx_dir: onnx_dir,
-        stt_model: stt_model.or(app_cfg.stt_model.clone()),
-        diarization_threshold: app_cfg.diarization_threshold,
-        diarization_num_speakers: app_cfg.diarization_num_speakers,
         enable_dubbing: enable_dubbing.unwrap_or(false),
         mix_volume: app_cfg.mix_volume,
     };
@@ -462,7 +450,7 @@ fn get_logs() -> Vec<LogEntry> {
 
 #[tauri::command]
 fn get_log_paths() -> Vec<String> {
-    log_paths().into_iter().map(|p| p.to_string_lossy().to_string()).collect()
+    vec![log_file().to_string_lossy().to_string()]
 }
 
 // ---- Logger setup (shared between GUI and headless) ----
@@ -484,12 +472,12 @@ pub fn setup_logger() {
         eprintln!("{}", msg);
         log_to_file(&msg);
     }
-    log::set_max_level(LevelFilter::Info);
+    // LevelFilter обязан пропускать все уровни, которые используются в коде
+    // (в translation/mod.rs есть log::debug!) — иначе лог молча теряется (core §2.5).
+    log::set_max_level(LevelFilter::Debug);
 
     log::info!("=== DubVidTra2 Start ===");
-    for p in log_paths() {
-        log::info!("Log file: {}", p.display());
-    }
+    log::info!("Log file: {}", log_file().display());
 }
 
 // ---- Entry ----
@@ -528,11 +516,6 @@ fn run_pipeline_blocking(
         output_format: "mp4".to_string(),
         gguf_model_path: cfg.gguf_model_path.clone(),
         ffmpeg_path: cfg.ffmpeg_path.clone(),
-        vad_threshold_db: cfg.vad_threshold_db.clone(),
-        sherpa_onnx_dir: cfg.sherpa_onnx_dir.clone(),
-        stt_model: cfg.stt_model.clone(),
-        diarization_threshold: cfg.diarization_threshold,
-        diarization_num_speakers: cfg.diarization_num_speakers,
         enable_dubbing,
         mix_volume: cfg.mix_volume,
     };
@@ -679,30 +662,21 @@ mod tests {
             .to_path_buf()
     }
 
-    fn run_pipeline(cfg: &config::AppConfig, stt_model: &str, label: &str) {
+    fn run_pipeline(cfg: &config::AppConfig, label: &str) {
         let video = project_root().join("test").join("for_test.mp4");
         assert!(video.exists(), "Тестовый файл не найден: {:?}", video);
 
         let translate = cfg.gguf_model_path.clone()
             .expect("Нет gguf_model_path в конфиге!");
 
-        let onnx_dir = cfg.sherpa_onnx_dir.clone();
-
         eprintln!("[TEST {}] Video: {}", label, video.display());
         eprintln!("[TEST {}] Translate: {}", label, translate);
-        eprintln!("[TEST {}] Sherpa-ONNX: {:?}", label, onnx_dir);
-        eprintln!("[TEST {}] STT model: {}", label, stt_model);
 
         let pipeline_cfg = PipelineConfig {
             input_path: video.to_string_lossy().to_string(),
             output_format: "mp4".to_string(),
             gguf_model_path: Some(translate),
             ffmpeg_path: None,
-            vad_threshold_db: None,
-            sherpa_onnx_dir: onnx_dir,
-            stt_model: Some(stt_model.to_string()),
-            diarization_threshold: cfg.diarization_threshold,
-            diarization_num_speakers: cfg.diarization_num_speakers,
             enable_dubbing: false,
             mix_volume: 1.0,
         };
@@ -751,17 +725,8 @@ mod tests {
 
     #[test]
     #[ignore] // требует запуска внутри tauri-приложения (движок STT — через plugin)
-    fn test_qwen3_asr() {
+    fn test_pipeline() {
         let cfg = config::load();
-        run_pipeline(&cfg, "qwen3-asr", "Qwen3-ASR");
-    }
-
-    #[test]
-    #[ignore] // требует запуска внутри tauri-приложения (движок STT — через plugin)
-    fn test_parakeet_tdt() {
-        // Для Parakeet используем соответствующий путь
-        let mut cfg = config::load();
-        cfg.sherpa_onnx_dir = Some(r"D:\nn\models\stt\parakeet-tdt-0.6b-v3-sherpa-onnx-fp16".to_string());
-        run_pipeline(&cfg, "parakeet-tdt", "Parakeet-TDT");
+        run_pipeline(&cfg, "Pipeline");
     }
 }
