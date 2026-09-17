@@ -123,13 +123,34 @@ EN: source text<turn|>
 - **Оба включаются строго по бэкенду:** `attempt_count = if tts_backend == "cosyvoice3-tts" { TTS_MAX_ATTEMPTS } else { 1 }`, `if tts_backend == "cosyvoice3-tts" { declick_spikes(...) }`.
 - Сейчас пресета `cosyvoice3-tts` в JSON нет → оба костыля фактически выключены. Оставлены в коде на будущее: если base вернётся в плагинский `speech_models.json`, retry и declick восстановятся автоматически. RL синтезирует 1 попыткой (seed=None) и без кликов → костыли для неё — zero overhead.
 
-## Testing
+## Build & Release (Tauri Build Toolkit)
+
+Сборка/тесты выполняются ТОЛЬКО через `.bat`-обёртки (desktop §2 — прямой вызов `cargo`/`npx tauri` запрещён).
+`build.bat`, `test.bat`, `generate_installer.bat`, `release.bat` — шаблоны общего тулкита
+`..\my-tauri-plugins\tauri-build-toolkit` (единый источник правды для всех проектов). Настройки
+проекта — `.build-config.json` в корне (repo, appExe, productName, signing, ...).
+
+**ВАЖНО:** команды `build`/`prep`/`installer`/`release` автоматически бампят версию по схеме YY.M.P
+в `src-tauri/tauri.conf.json` + `Cargo.toml` при каждом запуске. Dev-сборка (`build`) собирает без
+бандла (dev-override), `installer`/`release` включают `bundle.active`.
+
+Read-only диагностика: `node ..\my-tauri-plugins\tauri-build-toolkit\cli.cjs doctor --project "%CD%"`.
 
 ### Commands
 
-Сборка/тесты выполняются ТОЛЬКО через `.bat`-обёртки (desktop §2 — прямой вызов `cargo` запрещён).
-
 ```batch
+REM Dev-сборка: prep (бамп версии + npm install + иконки) + tauri build без бандла + запуск app.exe
+build.bat
+
+REM Unit-тесты: cargo test [фильтр] (компиляция+прогон; харнесс на этой машине часто падает на CUDA DLL)
+test.bat
+
+REM Установщик NSIS: prep + tauri build --bundles nsis + верификация установщика и .sig
+generate_installer.bat
+
+REM Полный релиз на GitHub: build + sign + gh release + latest.json + commit/push
+release.bat
+
 REM Полный pipeline-тест (TTS-дубляж, сохраняет raw/stretched/final WAV в temp/)
 run_tts_pipeline.bat
 
@@ -138,9 +159,6 @@ run_pipeline.bat
 
 REM Только компиляция тест-бинаря
 build_test_pipeline.bat
-
-REM Компиляция unit-тестов (харнесс на этой машине НЕ запускается — CUDA DLL, только проверка компиляции)
-test.bat
 
 REM Деклик red-тест (бинарь, работает): клики против порога <0.20 FS (костыль base, функция)
 build_test_declick.bat
@@ -152,13 +170,22 @@ build_test_retry.bat
 ### Batch files
 | File | Purpose |
 |------|---------|
-| `build.bat` | Production build (npm install + cargo release + tauri bundle) |
+| `build.bat` | Toolkit: dev build (`prep` + `npx tauri build` без бандла + запуск `app.exe`) |
+| `test.bat` | Toolkit: `cargo test [фильтр]` (компиляция + прогон unit-тестов) |
+| `generate_installer.bat` | Toolkit: сборка NSIS-установщика + верификация `.sig` |
+| `release.bat` | Toolkit: полный релиз (build + sign + `gh release` + `latest.json` + commit/push) |
+| `.build-config.json` | Конфиг тулкита (repo, appExe, productName, signing, ...) |
 | `run_pipeline.bat` | Full pipeline test (no dubbing) |
 | `run_tts_pipeline.bat` | Full pipeline with TTS dubbing, keeps raw/stretched/final WAVs (`DUBVID_KEEP_TTS_WAV=1`) |
 | `build_test_pipeline.bat` | Compile `test-pipeline` binary |
-| `test.bat` | Compilation check of unit tests only (harness fails to run with STATUS_ENTRYPOINT_NOT_FOUND — CUDA DLL at load, machine limitation) |
 | `build_test_declick.bat` | Build+run `test-tts-declick`: red test for base-костыля click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
 | `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
+
+Пайплайн-батники (`run_pipeline`, `run_tts_pipeline`, `build_test_pipeline`, `build_test_declick`,
+`build_test_retry`, `run_gemma4`) используют тот же MSVC-прелюд, что и шаблоны тулкита
+(vswhere → vcvarsall x64 + сброс `RUSTC_WRAPPER`/`CC`/`CXX`/`CARGO_PROFILE_*`), но запускают
+проектные `cargo run`/`cargo build` — у тулкита нет команды для произвольного бинаря.
+`run_gemma4.bat` — тонкий алиас на `run_pipeline.bat`.
 
 ### Output files (проектные папки, core §1.2)
 - Video with subtitles: `test/<name>_subbed.mp4` (рядом с исходником)

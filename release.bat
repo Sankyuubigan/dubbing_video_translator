@@ -18,7 +18,6 @@ if not exist "%TOOLKIT%" (
   exit /b 1
 )
 
-REM --- Find VS and init MSVC environment ---
 set "VS_INIT_OK="
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath 2^>nul`) do (
     if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" (
@@ -32,7 +31,6 @@ if not defined VS_INIT_OK (
   exit /b 1
 )
 
-REM --- Reset sccache wrappers so they do not leak into cargo ---
 set "CC="
 set "CXX="
 set "CMAKE_C_COMPILER_LAUNCHER="
@@ -40,17 +38,20 @@ set "CMAKE_CXX_COMPILER_LAUNCHER="
 set "RUSTC_WRAPPER="
 set "CARGO_BUILD_RUSTC_WRAPPER="
 
-REM --- Unset profile env overrides; profile lives only in Cargo.toml ---
 set "CARGO_PROFILE_RELEASE_LTO="
 set "CARGO_PROFILE_RELEASE_CODEGEN_UNITS="
 set "CARGO_PROFILE_RELEASE_STRIP="
 
-node "%TOOLKIT%" build --project "%PROJ%"
+echo [WARNING] release.bat will build, sign, publish a GitHub release, bump version,
+echo           regenerate latest.json and commit/push version files. Run only from a
+echo           clean target branch.
+
+node "%TOOLKIT%" release --project "%PROJ%"
 if errorlevel 1 (
-  echo [ERROR] Build failed.
+  echo [ERROR] Release failed.
   pause
   exit /b 1
 )
 
-echo [+DONE] build.bat finished.
+echo [+DONE] release.bat finished.
 endlocal

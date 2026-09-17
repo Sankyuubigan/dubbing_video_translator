@@ -1,0 +1,12 @@
+{
+  "repo": "Sankyuubigan/dubbing_video_translator",
+  "branch": "main",
+  "appExe": "app",
+  "productName": "dubvidtra2",
+  "npmInstallArgs": ["--legacy-peer-deps"],
+  "syncDirs": [],
+  "vcRedist": false,
+  "signing": {},
+  "syncPackageJsonVersion": false,
+  "releaseNotesTemplate": "Auto release ${product} ${tag}"
+}

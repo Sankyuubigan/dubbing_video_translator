@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "dubvidtra2",
-  "version": "0.1.0",
+  "version": "26.9.1",
   "identifier": "com.dubvidtra2.desktop",
   "build": {
     "frontendDist": "../dist",

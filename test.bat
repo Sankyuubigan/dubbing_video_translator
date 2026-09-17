@@ -1,64 +1,53 @@
 @echo off
-cd /d "%~dp0"
+setlocal enableextensions
 
-echo ========================================
-echo  DubVidTra2 - Run Unit Tests
-echo ========================================
-echo.
+set "PROJ=%~dp0"
+if not exist "%PROJ%src-tauri\tauri.conf.json" (
+  echo [ERROR] This script must live in the project root, next to src-tauri\tauri.conf.json
+  pause
+  exit /b 1
+)
 
-REM Setup MSVC environment if not already available
-where cl >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo [0/1] Setting up MSVC compiler environment...
-    for %%P in (
-        "D:\Programs\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
-        "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
-        "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat"
-        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
-        "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat"
-        "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
-    ) do (
-        if exist "%%~P" (
-            echo Found: %%~P
-            call "%%~P" x64
-            goto :msvc_done
-        )
+set "TOOLKIT=%TAURI_BUILD_TOOLKIT%"
+if "%TOOLKIT%"=="" set "TOOLKIT=%~dp0..\my-tauri-plugins\tauri-build-toolkit\cli.cjs"
+if not exist "%TOOLKIT%" (
+  echo [ERROR] Tauri build toolkit not found: "%TOOLKIT%"
+  echo Set env TAURI_BUILD_TOOLKIT to the toolkit cli.cjs, or place the
+  echo toolkit folder at: my-tauri-plugins\tauri-build-toolkit
+  pause
+  exit /b 1
+)
+
+set "VS_INIT_OK="
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath 2^>nul`) do (
+    if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" (
+        call "%%i\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
+        set "VS_INIT_OK=1"
     )
-    echo ERROR: Visual Studio C++ tools not found! Install "Desktop development with C++" workload.
-    pause
-    exit /b 1
 )
-:msvc_done
-
-echo [1/2] Compiling tests...
-cd src-tauri
-
-REM disable sccache wrapper from global cargo config
-set RUSTC_WRAPPER=
-
-call cargo test --lib --no-run --config "rustc-wrapper = ''"
-if %ERRORLEVEL% neq 0 (
-    echo ERROR: Compilation failed
-    pause
-    exit /b 1
+if not defined VS_INIT_OK (
+  echo [ERROR] Visual Studio not found. vswhere. Install VS with C++ workload.
+  pause
+  exit /b 1
 )
 
-echo.
-echo [2/2] Running unit tests...
-echo.
+set "CC="
+set "CXX="
+set "CMAKE_C_COMPILER_LAUNCHER="
+set "CMAKE_CXX_COMPILER_LAUNCHER="
+set "RUSTC_WRAPPER="
+set "CARGO_BUILD_RUSTC_WRAPPER="
 
-call cargo test --lib --config "rustc-wrapper = ''" -- translation --nocapture
-if %ERRORLEVEL% neq 0 (
-    echo.
-    echo WARNING: Tests failed to run (may be DLL/env issue).
-    echo Compilation succeeded though.
-    echo.
-    pause
-    exit /b 1
+set "CARGO_PROFILE_RELEASE_LTO="
+set "CARGO_PROFILE_RELEASE_CODEGEN_UNITS="
+set "CARGO_PROFILE_RELEASE_STRIP="
+
+node "%TOOLKIT%" test --project "%PROJ%" %*
+if errorlevel 1 (
+  echo [ERROR] Tests failed.
+  pause
+  exit /b 1
 )
 
-echo.
-echo ========================================
-echo  All tests passed!
-echo ========================================
-pause
+echo [+DONE] test.bat finished.
+endlocal
