@@ -114,14 +114,14 @@ EN: source text<turn|>
 - **Прочее (общие GGUF в той же папке):** flow-q8_0 + campplus-f16 + s3tok-f16 + hift-f16 + voices.gguf
 - Base-версия `cosyvoice3-tts` (т.е. `cosyvoice3-llm-q4_k.gguf`) УДАЛЕНА с диска и из `speech_models.json` — она глючила (обрезание финальных слогов в cross-lingual режиме). RL-постобучение стабильнее: на тесте 38 чанков обрезаний нет.
 - Выбор модели: env `DUBVID_TTS_PRESET` (приоритет, для headless A/B) → `tts_settings.json` → `preset` → дефолт `cosyvoice3-tts-rl`.
-- Пресеты грузятся из `speech_models.json`: внешний рядом с exe (приоритет) → встроенная копия плагина (`include_str!`). Проектная копия: `src-tauri/speech_models.json` (кладётся в resources); плагинная: `tauri-plugin-speech/speech_models.json` (fallback).
+- **Пресеты — ЕДИНЫЙ источник: `tauri-plugin-speech/speech_models.json`.** Плагин подключается через path-зависимость (`Cargo.toml:42`), его `include_str!` компилируется из этой папки при каждой сборке. `src-tauri/speech_models.json` УДАЛЁН (и из `tauri.conf.json` resources тоже) — внешний файл рядом с exe больше не создаётся. Любая правка пресетов делается только в плагине (`D:\Projects\my-tauri-plugins\tauri-plugin-speech\speech_models.json`).
 
-### Retry-костыль (только для base `cosyvoice3-tts`)
-- Историческая причина: base-модель в cross-lingual (EN-голос → RU-текст) выбрасывает LM reference-tokens и «обрезает» финальные слоги; RAS-семплер seed-зависим.
-- Механизм: `RetryTracker` + `TTS_RETRY_SEEDS` + `TTS_FULL_FLOOR=0.62` — повторы с разными seed, пока ДВЕ попытки не сойдутся на полноте ≥ 0.62×ожидаемой длительности (`expected_spoken_secs` по числу гласных, темп 4.4 гласных/сек).
-- **Включение строго по бэкенду:** `attempt_count = if tts_backend == "cosyvoice3-tts" { TTS_MAX_ATTEMPTS } else { 1 }`.
-- Сейчас пресета `cosyvoice3-tts` в JSON нет → костыль фактически выключен. Оставлен в коде на будущее: если base вернётся в `speech_models.json`, retry восстановится автоматически. RL синтезирует всегда 1 попыткой (seed=None).
-- Щелчки к костылю отношения не имеют: вычищаются из готовых сэмплов пост-обработкой `declick_spikes` для любой модели.
+### Retry-костыль и declick (только для base `cosyvoice3-tts`)
+- Историческая причина: base-модель в cross-lingual (EN-голос → RU-текст) выбрасывает LM reference-tokens и «обрезает» финальные слоги; RAS-семплер seed-зависим и даёт щелчки.
+- Retry-механизм: `RetryTracker` + `TTS_RETRY_SEEDS` + `TTS_FULL_FLOOR=0.62` — повторы с разными seed, пока ДВЕ попытки не сойдутся на полноте ≥ 0.62×ожидаемой длительности (`expected_spoken_secs` по числу гласных, темп 4.4 гласных/сек).
+- Деклик: `declick_spikes` — сглаживание 1-сэмпловых выбросов в финальных сэмплах (O(n), без перегенераций). Клики — артефакт base (фикстуры ч.3/ч.27 сняты с её прогонов 17.09 01:58, до установки RL).
+- **Оба включаются строго по бэкенду:** `attempt_count = if tts_backend == "cosyvoice3-tts" { TTS_MAX_ATTEMPTS } else { 1 }`, `if tts_backend == "cosyvoice3-tts" { declick_spikes(...) }`.
+- Сейчас пресета `cosyvoice3-tts` в JSON нет → оба костыля фактически выключены. Оставлены в коде на будущее: если base вернётся в плагинский `speech_models.json`, retry и declick восстановятся автоматически. RL синтезирует 1 попыткой (seed=None) и без кликов → костыли для неё — zero overhead.
 
 ## Testing
 
@@ -142,7 +142,7 @@ build_test_pipeline.bat
 REM Компиляция unit-тестов (харнесс на этой машине НЕ запускается — CUDA DLL, только проверка компиляции)
 test.bat
 
-REM Деклик red-тест (бинарь, работает): клики против порога <0.20 FS
+REM Деклик red-тест (бинарь, работает): клики против порога <0.20 FS (костыль base, функция)
 build_test_declick.bat
 
 REM RetryTracker-тесты по всем сценариям обрезания (бинарь, работает)
@@ -157,7 +157,7 @@ build_test_retry.bat
 | `run_tts_pipeline.bat` | Full pipeline with TTS dubbing, keeps raw/stretched/final WAVs (`DUBVID_KEEP_TTS_WAV=1`) |
 | `build_test_pipeline.bat` | Compile `test-pipeline` binary |
 | `test.bat` | Compilation check of unit tests only (harness fails to run with STATUS_ENTRYPOINT_NOT_FOUND — CUDA DLL at load, machine limitation) |
-| `build_test_declick.bat` | Build+run `test-tts-declick`: red test for click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
+| `build_test_declick.bat` | Build+run `test-tts-declick`: red test for base-костыля click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
 | `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
 
 ### Output files (проектные папки, core §1.2)
@@ -189,7 +189,7 @@ Fields: `gguf_model_path`, `ffmpeg_path`, `output_format`, `enable_dubbing`, `mi
 | `src-tauri/src/diarization/mod.rs` | CrispASR ASR + speaker diarization (single source) |
 | `src-tauri/src/stt/mod.rs` | Consumes diarization transcript |
 | `src-tauri/src/output/mod.rs` | Subtitle muxing |
-| `src-tauri/src/tts/mod.rs` | TTS дubляж: синтез + retry только для base (`RetryTracker`, `TTS_FULL_FLOOR`) + declick_spikes |
+| `src-tauri/src/tts/mod.rs` | TTS дubляж: синтез + retry и declick только для base (`RetryTracker`, `TTS_FULL_FLOOR`, `declick_spikes`) |
 | `src-tauri/src/bin/test_retry_tracker.rs` | Автономный тест сценариев обрезания (работает на этой машине) |
 | `src-tauri/src/paths.rs` | Единый источник путей (core §1.2/§2.5.1): `temp/`, `test/`, `test/last_logs` |
 | `src-tauri/Cargo.toml` | Rust dependencies |
