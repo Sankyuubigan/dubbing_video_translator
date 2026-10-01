@@ -1,17 +1,18 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import {
+  getEngineConfig,
+  MODELS_CHANGED_EVENT,
+  type EngineConfig,
+} from "@my-tauri-plugins/plugin-llama-engine";
+import "@my-tauri-plugins/plugin-logs";
 import "./App.css";
 import Settings from "./Settings";
 
 type Stage = "idle" | "select" | "processing" | "done" | "error";
 type Tab = "main" | "logs" | "settings";
-
-interface LogEntry {
-  level: string;
-  message: string;
-}
 
 interface ProgressUpdate {
   stage: string;
@@ -23,7 +24,7 @@ interface ProgressUpdate {
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("main");
   const [videoPath, setVideoPath] = useState<string>("");
-  const [ggufPath, setGgufPath] = useState<string>("");
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null);
   const [ffmpegPath, setFfmpegPath] = useState<string>("");
   const [format, setFormat] = useState<string>("mp4");
   const [enableDubbing, setEnableDubbing] = useState<boolean>(false);
@@ -33,10 +34,17 @@ export default function App() {
   const [progressStage, setProgressStage] = useState("");
   const [resultPath, setResultPath] = useState("");
   const [error, setError] = useState("");
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [logPaths, setLogPaths] = useState<string[]>([]);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  const [autoScroll, setAutoScroll] = useState(true);
+
+  const modelPath = engineCfg?.last_model || "";
+  const modelName = modelPath ? modelPath.split("\\").pop()?.split("/").pop() || modelPath : "";
+
+  const refreshEngineConfig = useCallback(async () => {
+    try {
+      setEngineCfg(await getEngineConfig());
+    } catch (e) {
+      console.error("Не удалось прочитать конфиг движка LLM", e);
+    }
+  }, []);
 
   useEffect(() => {
     const unlisten = listen<ProgressUpdate>("pipeline-progress", (e) => {
@@ -70,38 +78,23 @@ export default function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
+  // Активная модель живёт в конфиге плагина движка: читаем его на старте и
+  // обновляемся, когда модель меняется в Настройках (core §2.1, SSOT).
   useEffect(() => {
-    const unlisten = listen<LogEntry>("new-log", (e) => {
-      setLogs((prev) => [...prev.slice(-4999), e.payload]);
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
-  useEffect(() => {
-    invoke<LogEntry[]>("get_logs")
-      .then(setLogs)
-      .catch(() => {});
-    invoke<string[]>("get_log_paths")
-      .then(setLogPaths)
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (autoScroll) {
-      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [logs, autoScroll]);
+    void refreshEngineConfig();
+    const onChanged = () => { void refreshEngineConfig(); };
+    document.addEventListener(MODELS_CHANGED_EVENT, onChanged);
+    return () => document.removeEventListener(MODELS_CHANGED_EVENT, onChanged);
+  }, [refreshEngineConfig]);
 
   useEffect(() => {
     invoke<{
-      gguf_model_path: string | null;
       ffmpeg_path: string | null;
       output_format: string;
       enable_dubbing: boolean;
       mix_volume: number;
     }>("get_config")
       .then((cfg) => {
-        if (cfg.gguf_model_path) setGgufPath(cfg.gguf_model_path);
         if (cfg.ffmpeg_path) setFfmpegPath(cfg.ffmpeg_path);
         if (cfg.output_format) setFormat(cfg.output_format);
         setEnableDubbing(cfg.enable_dubbing);
@@ -114,7 +107,6 @@ export default function App() {
     const timer = setTimeout(() => {
       invoke("save_config", {
         cfg: {
-          gguf_model_path: ggufPath || null,
           ffmpeg_path: ffmpegPath || null,
           output_format: format,
           enable_dubbing: enableDubbing,
@@ -123,7 +115,7 @@ export default function App() {
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ggufPath, ffmpegPath, format, enableDubbing, mixVolume]);
+  }, [ffmpegPath, format, enableDubbing, mixVolume]);
 
   const handleSelectVideo = async () => {
     const file = await open({
@@ -140,8 +132,8 @@ export default function App() {
 
   const handleProcess = async () => {
     if (!videoPath) return;
-    if (!ggufPath) {
-      setError("Выберите GGUF-файл модели перевода");
+    if (!modelPath) {
+      setError("Модель перевода не выбрана — добавьте её в Настройках");
       return;
     }
     setStage("processing");
@@ -152,7 +144,6 @@ export default function App() {
 
     invoke("process_video", {
       inputPath: videoPath,
-      ggufModelPath: ggufPath,
       outputFormat: format,
       enableDubbing: enableDubbing,
     }).catch((e) => {
@@ -161,14 +152,8 @@ export default function App() {
     });
   };
 
-  const logLevelClass = (level: string) => {
-    if (level === "ERROR") return "log-error";
-    if (level === "WARN") return "log-warn";
-    return "";
-  };
-
   return (
-    <div className="app">
+    <div className={"app" + (activeTab === "logs" ? " app-wide" : "")}>
       <div className="tabs">
         <button
           className={"tab" + (activeTab === "main" ? " tab-active" : "")}
@@ -224,25 +209,26 @@ export default function App() {
           )}
 
           <div className="card">
-            <label>Модель перевода (GGUF)</label>
+            <label>Модель перевода</label>
             <div className="file-row">
-              {ggufPath ? (
-                <span className="file-name">
-                  {ggufPath.split("\\").pop()?.split("/").pop()}
-                </span>
+              {modelName ? (
+                <span className="file-name">{modelName}</span>
               ) : (
                 <span className="file-name dim">Не выбрана</span>
               )}
-              <button className="btn-secondary" onClick={async () => {
-                const file = await open({
-                  multiple: false,
-                  filters: [{ name: "GGUF Model", extensions: ["gguf"] }],
-                });
-                if (file) setGgufPath(file);
-              }}>
-                Выбрать
+              <button
+                className="btn-secondary"
+                onClick={() => setActiveTab("settings")}
+              >
+                {modelName ? "Изменить" : "Выбрать в Настройках"}
               </button>
             </div>
+            {!modelName && (
+              <p className="hint">
+                Настройки → «Локальные модели перевода»: скачайте модель из
+                каталога или добавьте свой GGUF-файл.
+              </p>
+            )}
           </div>
 
           <div className="card checkbox-card">
@@ -358,57 +344,7 @@ export default function App() {
 
       {activeTab === "logs" && (
         <div className="logs-panel">
-          {logPaths.length > 0 && (
-            <div className="log-file-path">
-              Файлы логов:
-              {logPaths.map((p, i) => (
-                <div key={i} className="log-file-path-value">{p}</div>
-              ))}
-            </div>
-          )}
-          <div className="logs-toolbar">
-            <span className="logs-count">Записей: {logs.length}</span>
-            <button
-              className="btn-secondary"
-              onClick={() => setLogs([])}
-            >
-              Очистить
-            </button>
-            <button
-              className="btn-secondary"
-              onClick={async () => {
-                const text = logs.map(e => `[${e.level}] ${e.message}`).join('\n');
-                try {
-                  await navigator.clipboard.writeText(text);
-                } catch {}
-              }}
-            >
-              Копировать все
-            </button>
-          </div>
-          <div
-            className="logs-container"
-            onScroll={(e) => {
-              const el = e.currentTarget;
-              const atBottom =
-                el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-              setAutoScroll(atBottom);
-            }}
-          >
-            {logs.length === 0 && (
-              <div className="logs-empty">Нет записей</div>
-            )}
-            {logs.map((entry, i) => (
-              <div
-                key={i}
-                className={"log-entry " + logLevelClass(entry.level)}
-              >
-                <span className="log-level">[{entry.level}]</span>
-                <span className="log-msg">{entry.message}</span>
-              </div>
-            ))}
-            <div ref={logsEndRef} />
-          </div>
+          <logs-panel />
         </div>
       )}
     </div>

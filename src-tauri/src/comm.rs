@@ -30,7 +30,6 @@ pub struct SubtitleChunk {
 pub struct PipelineConfig {
     pub input_path: String,
     pub output_format: String,
-    pub gguf_model_path: Option<String>,
     pub ffmpeg_path: Option<String>,
     pub enable_dubbing: bool,
     pub mix_volume: f64,

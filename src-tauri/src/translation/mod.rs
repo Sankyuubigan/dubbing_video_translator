@@ -1,67 +1,54 @@
 use crate::comm::{PipelineContext, SubtitleChunk};
+use crate::llm::{message, LlmSession};
 use anyhow::Result;
-use encoding_rs::UTF_8;
-use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
-use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::token::LlamaToken;
-use std::num::NonZeroU32;
-use std::path::Path;
+use tauri_plugin_llama_engine::engine::LlmMessage;
 
-const MAX_N_CTX: u32 = 8192;
 const MAX_CONTEXT_CHUNKS: usize = 8;
-const SAMPLING_TEMP: f32 = 0.6;
-const SAMPLING_TOP_K: i32 = 64;
-const SAMPLING_TOP_P: f32 = 0.95;
-const SAMPLING_REP_PENALTY: f32 = 1.05;
 
-fn build_prompt(
+/// Системная часть промпта. Раньше она собиралась в строку Gemma-4 вручную
+/// (`<|turn>system ... <turn|>`); теперь промпт рендерит сам движок по
+/// `tokenizer.chat_template` модели, а мы отдаём обычные роли.
+const SYSTEM_RULES: &str = "\
+You are an expert audiovisual translator adapting English video subtitles into Russian for voiceover.
+
+STRICT RULES:
+1. CONTEXT & ASR FIXES: The input contains Speech-to-Text errors (e.g., 'Three to C' might mean '32C' bra size). Fix them based on the surrounding context.
+2. ISOCHRONY (TIMING): The Russian text MUST be exactly as short as the English text to fit the audio duration. Omit filler words (oh, well, yeah) and use concise synonyms.
+3. NUMBERS TO WORDS: You MUST spell out ALL numbers and symbols using Russian words (e.g. 'сто семьдесят сантиметров' instead of '170 см', 'тридцать два' instead of '32'). TTS engine cannot read digits.
+4. METRIC: Convert imperial units to metric before spelling them out.
+5. GENDER: Current speaker is [SPEAKER_GENDER]. Ensure Russian verbs/adjectives match this gender perfectly.
+6. NO CENSORSHIP: Preserve all slang and profanity accurately.
+7. OUTPUT FORMAT: Output ONLY the final spoken Russian text. Do NOT think out loud, do NOT analyze, do NOT offer options or variants. Do NOT repeat or revise the answer. Do NOT add prefixes like \"Translation:\" or quotation marks.";
+
+/// Собирает сообщения для одного чанка: правила + предыдущие пары EN/RU +
+/// lookahead по английскому оригиналу (source-side контекст важнее целевого).
+fn build_messages(
     current_text: &str,
     prev_chunks: &[(String, String)],
     next_chunks: &[String],
     speaker_gender: &str,
-) -> String {
-    let mut p = String::from(
-        "<|turn>system\n\
-        You are an expert audiovisual translator adapting English video subtitles into Russian for voiceover.\n\n\
-        STRICT RULES:\n\
-        1. CONTEXT & ASR FIXES: The input contains Speech-to-Text errors (e.g., 'Three to C' might mean '32C' bra size). Fix them based on the surrounding context.\n\
-        2. ISOCHRONY (TIMING): The Russian text MUST be exactly as short as the English text \
-        to fit the audio duration. Omit filler words (oh, well, yeah) and use concise synonyms.\n\
-        3. NUMBERS TO WORDS: You MUST spell out ALL numbers and symbols using Russian words \
-        (e.g. 'сто семьдесят сантиметров' instead of '170 см', 'тридцать два' instead of '32'). TTS engine cannot read digits.\n\
-        4. METRIC: Convert imperial units to metric before spelling them out.\n\
-        5. GENDER: Current speaker is [SPEAKER_GENDER]. Ensure Russian verbs/adjectives match this gender perfectly.\n\
-        6. NO CENSORSHIP: Preserve all slang and profanity accurately.\n\
-        7. OUTPUT FORMAT: Output the translation ONLY ONCE. Do NOT repeat or revise the answer. \
-        Do NOT add prefixes like \"Translation:\" or quotation marks.\n\n\
-        First, use <|channel>thought to analyze the context, fix errors, and plan a concise translation. Then, output ONLY the final spoken Russian text in the normal channel.<turn|>\n\
-        <|turn>user\n",
-    );
-    p = p.replace("[SPEAKER_GENDER]", speaker_gender);
+) -> Vec<LlmMessage> {
+    let system = SYSTEM_RULES.replace("[SPEAKER_GENDER]", speaker_gender);
 
+    let mut user = String::new();
     if !prev_chunks.is_empty() {
-        p.push_str("\nPrevious context:\n");
+        user.push_str("Previous context:\n");
         for (en, ru) in prev_chunks.iter() {
-            p.push_str(&format!("EN: {}\nRU: {}\n", en, ru));
+            user.push_str(&format!("EN: {}\nRU: {}\n", en, ru));
         }
     }
-
     if !next_chunks.is_empty() {
-        p.push_str("\nFuture context (DO NOT translate yet):\n");
+        user.push_str("\nFuture context (DO NOT translate yet):\n");
         for en in next_chunks.iter() {
-            p.push_str(&format!("EN: {}\n", en));
+            user.push_str(&format!("EN: {}\n", en));
         }
     }
-
-    p.push_str(&format!(
-        "\nTranslate this current text:\nEN: {}\n<turn|>\n<|turn>model\n<|channel>thought\n",
-        current_text,
+    user.push_str(&format!(
+        "\nTranslate this current text:\nEN: {}\n",
+        current_text
     ));
 
-    p
+    vec![message("system", system), message("user", user)]
 }
 
 /// Merges adjacent chunks that belong to the same speaker and form an incomplete sentence.
@@ -323,28 +310,6 @@ fn merge_interjections(chunks: &[SubtitleChunk]) -> Vec<SubtitleChunk> {
     merged
 }
 
-fn generate<'a>(
-    model: &'a LlamaModel,
-    ctx: &mut LlamaContext<'a>,
-    sampler: &mut LlamaSampler,
-    prompt: &str,
-    eos: LlamaToken,
-    max_new: usize,
-) -> Result<Vec<LlamaToken>> {
-    crate::llm::generate_tokens(model, ctx, sampler, prompt, eos, max_new, true)
-}
-
-fn decode_tokens(model: &LlamaModel, tokens: &[LlamaToken]) -> String {
-    let mut decoder = UTF_8.new_decoder();
-    let mut result = String::new();
-    for &token in tokens {
-        if let Ok(piece) = model.token_to_piece(token, &mut decoder, false, None) {
-            result.push_str(&piece);
-        }
-    }
-    result
-}
-
 pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
     let chunks_src = match ctx.subtitle_chunks.as_ref() {
         Some(c) => c,
@@ -367,67 +332,12 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
         chunks.len()
     );
 
-    let model_path = match ctx.config.gguf_model_path.as_ref() {
-        Some(p) => p,
-        None => {
-            log::warn!("Перевод: не выбран GGUF-файл модели, пропускаем перевод");
-            return Ok(PipelineContext {
-                translated_chunks: Some(chunks),
-                ..ctx
-            });
-        }
-    };
-
-    if !Path::new(model_path).exists() {
-        log::warn!("Перевод: GGUF модель не найдена: {}, пропускаем перевод", model_path);
-        return Ok(PipelineContext {
-            translated_chunks: Some(chunks),
-            ..ctx
-        });
-    }
-
-    log::info!("Перевод: загружаем LLM из {}", model_path);
-
-    let backend = match crate::get_llama_backend() {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("Перевод: {} — пропускаем перевод", e);
-            return Ok(PipelineContext {
-                translated_chunks: Some(chunks),
-                ..ctx
-            });
-        }
-    };
-    let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
-    let model = match LlamaModel::load_from_file(backend, model_path, &model_params) {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("Перевод: ошибка загрузки модели: {:#} — пропускаем перевод", e);
-            return Ok(PipelineContext {
-                translated_chunks: Some(chunks),
-                ..ctx
-            });
-        }
-    };
-
+    // Сессия движка на весь этап: один запуск llama-server, по чанку — запрос.
+    // При выходе из функции движок дропается и VRAM освобождается до TTS.
+    let app = crate::app_handle()
+        .ok_or_else(|| anyhow::anyhow!("AppHandle не инициализирован — движок LLM недоступен"))?;
+    let session = LlmSession::open(app).map_err(anyhow::Error::msg)?;
     log::info!("Перевод: {} чанков после мержа", chunks.len());
-
-    let mut ctx_llm = model.new_context(
-        backend,
-        LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(MAX_N_CTX))
-            .with_n_batch(MAX_N_CTX),
-    )?;
-
-    let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::penalties(512, SAMPLING_REP_PENALTY, 0.0, 0.0),
-        LlamaSampler::top_k(SAMPLING_TOP_K),
-        LlamaSampler::top_p(SAMPLING_TOP_P, 1),
-        LlamaSampler::temp(SAMPLING_TEMP),
-        LlamaSampler::dist(42),
-    ]);
-
-    let eos = model.token_eos();
 
     let mut result: Vec<SubtitleChunk> = Vec::new();
     let mut prev_chunks: Vec<(String, String)> = Vec::new();
@@ -469,13 +379,16 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
             })
             .unwrap_or("Person");
 
-        // 3. Build prompt with full context
-        let prompt = build_prompt(&chunk.text, &prev_chunks, &next_chunks, speaker_gender);
+        // 3. Build messages with full context
+        let messages = build_messages(&chunk.text, &prev_chunks, &next_chunks, speaker_gender);
 
-        let tokens = match model.str_to_token(&prompt, AddBos::Always) {
-            Ok(t) => t,
+        let generation = match session.generate(&messages, None) {
+            Ok(g) => g,
             Err(e) => {
-                log::error!("Перевод: ошибка токенизации: {:#}", e);
+                if crate::is_cancelled() {
+                    anyhow::bail!("Перевод отменён пользователем");
+                }
+                log::error!("Перевод: ошибка генерации для '{}': {}", chunk.text, e);
                 result.push(SubtitleChunk {
                     text: format!("[{}]", chunk.text),
                     ..chunk.clone()
@@ -488,60 +401,21 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
             }
         };
 
-        // Dynamic max_new: more tokens for longer prompts
-        let max_new = ((tokens.len() / 2)
-            .max(64))
-            .min(512)
-            .min(MAX_N_CTX as usize - tokens.len() - 50);
-        if max_new < 16 {
-            log::warn!(
-                "Перевод: промпт слишком длинный ({} токенов), fallback",
-                tokens.len()
-            );
-            result.push(SubtitleChunk {
-                text: format!("[{}]", chunk.text),
-                ..chunk.clone()
-            });
-            prev_chunks.push((chunk.text.clone(), String::new()));
-            if prev_chunks.len() > MAX_CONTEXT_CHUNKS {
-                prev_chunks.remove(0);
-            }
-            continue;
-        }
-
-        ctx_llm.clear_kv_cache();
-        sampler.reset();
-
-        let toks = generate(&model, &mut ctx_llm, &mut sampler, &prompt, eos, max_new)?;
-        let raw = decode_tokens(&model, &toks);
+        let output = clean_output(&generation.text);
         let chunk_preview: String = chunk.text.chars().take(20).collect();
-        let raw_start: String = raw.chars().take(80).collect();
-        let raw_end: String = raw
-            .chars()
-            .rev()
-            .take(40)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
         log::info!(
-            "Перевод: чанк '{}' -> {} токенов, raw_start='{}', raw_end='{}'",
+            "Перевод: '{}' -> {} токенов, '{}'",
             chunk_preview,
-            toks.len(),
-            raw_start,
-            raw_end,
+            generation.metrics.generated_tokens,
+            output,
         );
-        let output = clean_output(&raw);
-
-        if chunk.text.trim() == "Five seven." {
-            log::info!("CLEANOUTPUT_DEBUG: 'Five seven.' raw_len={}, output='{}'", raw.len(), output);
-        }
 
         let translated = if output.is_empty() {
             log::warn!(
-                "Перевод: пустой вывод для '{}' ({} токенов)",
+                "Перевод: пустой вывод для '{}' ({} токенов, stop_reason={})",
                 chunk.text,
-                toks.len()
+                generation.metrics.generated_tokens,
+                generation.stop_reason
             );
             SubtitleChunk {
                 text: format!("[{}]", chunk.text),
@@ -577,27 +451,38 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
 mod tests {
     use super::*;
 
+    /// Текст промпта собирается из system+user: движок сам рендерит его по
+    /// `tokenizer.chat_template` модели, поэтому тест проверяет роли и
+    /// содержимое, а не теги Gemma-4.
+    fn flatten(messages: &[LlmMessage]) -> String {
+        messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn test_build_prompt_format() {
-        let prompt = build_prompt("Hello world", &[], &[], "Person");
+    fn test_build_messages_format() {
+        let messages = build_messages("Hello world", &[], &[], "Person");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+        let prompt = flatten(&messages);
         assert!(prompt.contains("Hello world"));
-        assert!(prompt.contains("<|turn>system"));
-        assert!(prompt.contains("<|turn>user"));
-        assert!(prompt.contains("<turn|>"));
-        assert!(prompt.contains("<|turn>model"));
         assert!(prompt.contains("expert audiovisual translator"));
         assert!(prompt.contains("ASR FIXES"));
         assert!(prompt.contains("ISOCHRONY"));
         assert!(prompt.contains("NUMBERS TO WORDS"));
         assert!(prompt.contains("NO CENSORSHIP"));
-        assert!(prompt.contains("<|channel>thought"));
         assert!(!prompt.contains("[SPEAKER_GENDER]"));
     }
 
     #[test]
-    fn test_build_prompt_with_context() {
+    fn test_build_messages_with_context() {
         let ctx = vec![("First EN text".to_string(), "Первая".to_string())];
-        let prompt = build_prompt("Second", &ctx, &[], "Person");
+        let messages = build_messages("Second", &ctx, &[], "Person");
+        let prompt = flatten(&messages);
         assert!(prompt.contains("Second"));
         assert!(prompt.contains("Previous context:"));
         assert!(prompt.contains("Первая"));
@@ -607,13 +492,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_prompt_with_multiple_contexts() {
+    fn test_build_messages_with_multiple_contexts() {
         let ctx = vec![
             ("First EN".to_string(), "Первая".to_string()),
             ("Second EN".to_string(), "Вторая".to_string()),
             ("Third EN".to_string(), "Третья".to_string()),
         ];
-        let prompt = build_prompt("Fourth", &ctx, &[], "Person");
+        let messages = build_messages("Fourth", &ctx, &[], "Person");
+        let prompt = flatten(&messages);
         assert!(prompt.contains("Fourth"));
         assert!(prompt.contains("First EN"));
         assert!(prompt.contains("Second EN"));
@@ -624,9 +510,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_prompt_with_lookahead() {
+    fn test_build_messages_with_lookahead() {
         let next = vec!["Next text".to_string(), "Future text".to_string()];
-        let prompt = build_prompt("Current", &[], &next, "Male");
+        let messages = build_messages("Current", &[], &next, "Male");
+        let prompt = flatten(&messages);
         assert!(prompt.contains("Current"));
         assert!(prompt.contains("Future context"));
         assert!(prompt.contains("Next text"));
@@ -635,12 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_prompt_with_gender() {
-        let prompt = build_prompt("Hello", &[], &[], "Female");
+    fn test_build_messages_with_gender() {
+        let prompt = flatten(&build_messages("Hello", &[], &[], "Female"));
         assert!(prompt.contains("Female"));
         assert!(prompt.contains("match this gender perfectly"));
 
-        let prompt = build_prompt("Hello", &[], &[], "Male");
+        let prompt = flatten(&build_messages("Hello", &[], &[], "Male"));
         assert!(prompt.contains("Male"));
         assert!(prompt.contains("match this gender perfectly"));
     }

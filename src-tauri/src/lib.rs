@@ -13,44 +13,23 @@ pub mod tts;
 mod verification;
 
 use comm::{PipelineConfig, PipelineContext, ProgressUpdate};
-use llama_cpp_2::llama_backend::LlamaBackend;
-use log::{LevelFilter, Log, Metadata, Record};
-use serde::Serialize;
-use std::io::Write;
-use std::panic;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 
-// ---- LlamaBackend (for translation module, init once) ----
-
-static LLAMA_BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
-static LLAMA_INIT_ERR: Mutex<Option<String>> = Mutex::new(None);
-
-pub fn get_llama_backend() -> Result<&'static LlamaBackend, String> {
-    if let Some(backend) = LLAMA_BACKEND.get() {
-        return Ok(backend);
-    }
-    if let Some(err) = LLAMA_INIT_ERR.lock().unwrap().as_ref() {
-        return Err(err.clone());
-    }
-    match LlamaBackend::init() {
-        Ok(b) => {
-            let _ = LLAMA_BACKEND.set(b);
-            Ok(LLAMA_BACKEND.get().unwrap())
-        }
-        Err(e) => {
-            let msg = format!("Ошибка инициализации LlamaBackend: {:#}", e);
-            *LLAMA_INIT_ERR.lock().unwrap() = Some(msg.clone());
-            Err(msg)
-        }
-    }
-}
-
 // ---- Pipeline busy flag (prevent double run) & cancel ----
 
 static PIPELINE_BUSY: AtomicBool = AtomicBool::new(false);
-static PIPELINE_CANCEL: AtomicBool = AtomicBool::new(false);
+static PIPELINE_CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Флаг отмены пайплайна. `Arc`, потому что движок LLM (плагин
+/// `tauri-plugin-llama-engine`) принимает `Arc<AtomicBool>` и прерывает
+/// генерацию по нему — один и тот же флаг видит и пайплайн, и движок.
+pub fn cancel_flag() -> Arc<AtomicBool> {
+    PIPELINE_CANCEL
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
 
 #[tauri::command]
 fn is_pipeline_busy() -> bool {
@@ -59,13 +38,13 @@ fn is_pipeline_busy() -> bool {
 
 #[tauri::command]
 fn cancel_pipeline() -> bool {
-    let was_set = PIPELINE_CANCEL.swap(true, Ordering::SeqCst);
+    let was_set = cancel_flag().swap(true, Ordering::SeqCst);
     log::info!("Cancel: пользователь запросил отмену");
     !was_set // true если флаг был установлен сейчас
 }
 
 pub fn is_cancelled() -> bool {
-    PIPELINE_CANCEL.load(Ordering::SeqCst)
+    cancel_flag().load(Ordering::SeqCst)
 }
 
 struct PipelineGuard;
@@ -83,7 +62,7 @@ impl PipelineGuard {
 impl Drop for PipelineGuard {
     fn drop(&mut self) {
         PIPELINE_BUSY.store(false, Ordering::SeqCst);
-        PIPELINE_CANCEL.store(false, Ordering::SeqCst);
+        cancel_flag().store(false, Ordering::SeqCst);
     }
 }
 
@@ -212,127 +191,6 @@ fn find_stt_gguf(root: &std::path::Path, prefer: &str) -> Option<std::path::Path
     matches.into_iter().next()
 }
 
-// ---- Log buffer ----
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LogEntry {
-    pub level: String,
-    pub message: String,
-}
-
-static LOG_BUF: Mutex<Vec<LogEntry>> = Mutex::new(Vec::new());
-
-/// Единственный файл лога последней сессии: `<root>/test/last_logs` (core §2.5.1).
-fn log_file() -> std::path::PathBuf {
-    paths::last_logs_file()
-}
-
-/// Очищает `test/last_logs` при старте (core §2.5.1).
-pub fn truncate_logs() {
-    let path = log_file();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&path, "") {
-        eprintln!("WARN: не удалось очистить {}: {}", path.display(), e);
-    }
-}
-
-fn log_to_file(msg: &str) {
-    let path = log_file();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            let _ = writeln!(f, "{}", msg);
-            let _ = f.flush();
-        }
-        Err(e) => eprintln!("WARN: не удалось записать {}: {}", path.display(), e),
-    }
-}
-
-/// Метка времени `[ГГГГ-ММ-ДД ЧЧ:ММ:ССZ]` (UTC; локальное время без внешних
-/// зависимостей недоступно — core §2.5.1 допускает UTC с суффиксом `Z`).
-fn timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z]",
-        y,
-        m,
-        d,
-        rem / 3600,
-        (rem / 60) % 60,
-        rem % 60
-    )
-}
-
-/// Гражданская дата из числа дней от 1970-01-01 (алгоритм Говарда Хиннанта).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-// ---- Custom Logger (file + stdout + buffer + Tauri events) ----
-
-struct AppLogger;
-
-impl Log for AppLogger {
-    fn enabled(&self, _metadata: &Metadata) -> bool {
-        true
-    }
-
-    fn log(&self, record: &Record) {
-        let ts = timestamp();
-        let msg = format!("{} [{}] {}", ts, record.level(), record.args());
-        let plain = format!("{}", record.args());
-
-        // stderr (всегда работает)
-        eprintln!("{}", msg);
-
-        // file (все пути)
-        log_to_file(&msg);
-
-        // memory buffer
-        let entry = LogEntry {
-            level: record.level().to_string(),
-            message: plain,
-        };
-        if let Ok(mut buf) = LOG_BUF.lock() {
-            if buf.len() >= 5000 {
-                buf.remove(0);
-            }
-            buf.push(entry.clone());
-        }
-
-        // emit to frontend
-        if let Some(handle) = APP_HANDLE.get() {
-            let _ = handle.emit("new-log", entry);
-        }
-    }
-
-    fn flush(&self) {}
-}
-
 // ---- App State ----
 
 struct AppState {
@@ -344,7 +202,6 @@ struct AppState {
 #[tauri::command]
 fn process_video(
     input_path: String,
-    gguf_model_path: Option<String>,
     output_format: Option<String>,
     enable_dubbing: Option<bool>,
     app_handle: tauri::AppHandle,
@@ -360,7 +217,6 @@ fn process_video(
     let cfg = PipelineConfig {
         input_path,
         output_format: output_format.unwrap_or_default(),
-        gguf_model_path,
         ffmpeg_path: app_cfg.ffmpeg_path.clone(),
         enable_dubbing: enable_dubbing.unwrap_or(false),
         mix_volume: app_cfg.mix_volume,
@@ -443,48 +299,27 @@ fn save_config(state: tauri::State<AppState>, cfg: config::AppConfig) -> Result<
     Ok(())
 }
 
-#[tauri::command]
-fn get_logs() -> Vec<LogEntry> {
-    LOG_BUF.lock().unwrap().clone()
-}
-
-#[tauri::command]
-fn get_log_paths() -> Vec<String> {
-    vec![log_file().to_string_lossy().to_string()]
-}
-
 // ---- Logger setup (shared between GUI and headless) ----
 
-pub fn setup_logger() {
-    panic::set_hook(Box::new(move |info| {
-        let msg = format!("PANIC: {}", info);
-        eprintln!("{}", msg);
-        log_to_file(&msg);
-        if let Some(location) = info.location() {
-            let loc = format!("  at {}", location);
-            eprintln!("{}", loc);
-            log_to_file(&loc);
-        }
-    }));
-
-    if let Err(e) = log::set_logger(&AppLogger) {
-        let msg = format!("WARN: log::set_logger failed: {}", e);
-        eprintln!("{}", msg);
-        log_to_file(&msg);
-    }
-    // LevelFilter обязан пропускать все уровни, которые используются в коде
-    // (в translation/mod.rs есть log::debug!) — иначе лог молча теряется (core §2.5).
-    log::set_max_level(LevelFilter::Debug);
-
-    log::info!("=== DeeDub Start ===");
-    log::info!("Log file: {}", log_file().display());
-}
+/// Логирование — плагин `tauri-plugin-logs` (core §2.5.2): он ставит
+/// `log::Log`, пишет `deedub.log` рядом с exe, зеркалит в `test/last_logs.txt`
+/// и шлёт строки в UI по событию `logs:message`. Хост только подключает
+/// плагин в `base_builder` и вызывает `tauri_plugin_logs::early_init`
+/// первой строкой входа (там же ловится паника до создания приложения).
+pub const LOG_FILE_NAME: &str = "deedub.log";
 
 // ---- Entry ----
 
 /// Единый Builder: плагины + AppState + команды. Общий для GUI и headless.
 fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
+        // Логи первыми: остальные плагины пишут через `log::` (core §2.5.2).
+        .plugin(tauri_plugin_logs::init())
+        // Единый движок скачивания — обязателен для плагина движка LLM.
+        .plugin(tauri_plugin_downloader::init())
+        // Движок LLM: llama-server отдельным процессом, каталог моделей,
+        // выбор активной модели (desktop §6.7).
+        .plugin(tauri_plugin_llama_engine::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
@@ -498,10 +333,19 @@ fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
             process_video,
             get_config,
             save_config,
-            get_logs,
-            get_log_paths,
         ])
 }
+
+/// Общий для GUI и headless вход: логгер (с ловлей паники до создания
+/// приложения) + папка конфига плагина движка LLM.
+fn init_logging_and_engine_config() {
+    tauri_plugin_logs::early_init(LOG_FILE_NAME);
+    tauri_plugin_llama_engine::engine::config::set_app_data_dir_name(APP_DATA_DIR_NAME);
+}
+
+/// Имя папки app-data — единый источник для `tauri-plugin-llama-engine`
+/// (совпадает с `identifier` в `tauri.conf.json`).
+const APP_DATA_DIR_NAME: &str = "com.deedub.desktop";
 
 fn run_pipeline_blocking(
     handle: tauri::AppHandle,
@@ -514,7 +358,6 @@ fn run_pipeline_blocking(
     let pcfg = comm::PipelineConfig {
         input_path: video,
         output_format: "mp4".to_string(),
-        gguf_model_path: cfg.gguf_model_path.clone(),
         ffmpeg_path: cfg.ffmpeg_path.clone(),
         enable_dubbing,
         mix_volume: cfg.mix_volume,
@@ -573,8 +416,7 @@ fn spawn_pipeline_thread(handle: tauri::AppHandle, video: String, enable_dubbing
 /// Полноценное GUI-приложение Tauri.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    truncate_logs();
-    setup_logger();
+    init_logging_and_engine_config();
 
     let app_cfg = config::load();
 
@@ -607,8 +449,7 @@ pub fn run() {
 ///
 /// Возвращает: 0 — успех, 1 — ошибка пайплайна/падение.
 pub fn run_headless(video_path: String, enable_dubbing: bool) -> i32 {
-    truncate_logs();
-    setup_logger();
+    init_logging_and_engine_config();
 
     let app_cfg = config::load();
 
@@ -666,17 +507,12 @@ mod tests {
         let video = project_root().join("test").join("for_test.mp4");
         assert!(video.exists(), "Тестовый файл не найден: {:?}", video);
 
-        let translate = cfg.gguf_model_path.clone()
-            .expect("Нет gguf_model_path в конфиге!");
-
         eprintln!("[TEST {}] Video: {}", label, video.display());
-        eprintln!("[TEST {}] Translate: {}", label, translate);
 
         let pipeline_cfg = PipelineConfig {
             input_path: video.to_string_lossy().to_string(),
             output_format: "mp4".to_string(),
-            gguf_model_path: Some(translate),
-            ffmpeg_path: None,
+            ffmpeg_path: cfg.ffmpeg_path.clone(),
             enable_dubbing: false,
             mix_volume: 1.0,
         };

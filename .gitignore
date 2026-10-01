@@ -43,3 +43,9 @@ debug_*.txt
 /models
 /research_tower_plus_9b
 /temp
+
+# VC++ runtime для llama-server.exe — генерируется тулкитом (vcRedist в .build-config.json)
+/src-tauri/redist
+# Конфиг dev-оверрайда сборки (создаётся build.bat)
+/src-tauri/tauri-dev-override.json
+/tasks

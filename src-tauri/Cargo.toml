@@ -1,6 +1,6 @@
 [package]
 name = "deedub"
-version = "26.9.1"
+version = "26.9.4"
 description = "DeeDub — локальный перевод видео с субтитрами и дубляжом"
 authors = ["you"]
 license = ""
@@ -40,15 +40,18 @@ tauri-plugin-dialog = "2.0.0-rc"
 tauri-plugin-fs = "2.0.0-rc"
 tauri-plugin-process = "2.0.0-rc"
 tauri-plugin-speech = { path = "../../my-tauri-plugins/tauri-plugin-speech" }
+tauri-plugin-logs = { path = "../../my-tauri-plugins/tauri-plugin-logs" }
+# Единый движок скачивания: его использует плагин движка LLM для загрузки
+# llama-server.exe и моделей (desktop §6.7 — LLM только отдельным процессом).
+tauri-plugin-downloader = { path = "../../my-tauri-plugins/tauri-plugin-downloader" }
+tauri-plugin-llama-engine = { path = "../../my-tauri-plugins/tauri-plugin-llama-engine", features = ["host-logs"] }
 
 anyhow = "1.0"
 thiserror = "1.0"
 toml = "0.8"
 dirs = "6.0"
 hound = "3.5"
-encoding_rs = "0.8"
 
-llama-cpp-2 = { version = "0.1.146", features = ["cuda"] }
 regex = "1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 

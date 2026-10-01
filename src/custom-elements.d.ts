@@ -6,6 +6,10 @@ declare module "react" {
       "speech-engine-panel": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
       "speech-models-panel": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
       "speech-voice-storage": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
+      "llama-engine-panel": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
+      "llama-download-panel": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
+      "llama-models-panel": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
+      "logs-panel": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement>;
     }
   }
 }

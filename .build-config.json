@@ -5,7 +5,7 @@
   "productName": "DeeDub",
   "npmInstallArgs": ["--legacy-peer-deps"],
   "syncDirs": [],
-  "vcRedist": false,
+  "vcRedist": true,
   "signing": {},
   "syncPackageJsonVersion": false,
   "releaseNotesTemplate": "Auto release ${product} ${tag}"

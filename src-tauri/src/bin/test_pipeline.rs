@@ -39,12 +39,6 @@ fn main() {
     let enable_dubbing = args.iter().any(|a| a == "--dub");
     log::info!("test-pipeline: video = {}, dub = {}", video, enable_dubbing);
 
-    let cfg = deedub_lib::config::load();
-    if cfg.gguf_model_path.as_deref().unwrap_or("").is_empty() {
-        log::error!("Missing gguf_model_path in config");
-        std::process::exit(1);
-    }
-
     eprintln!("test-pipeline: headless (dub={})", enable_dubbing);
     let code = deedub_lib::run_headless(video, enable_dubbing);
 

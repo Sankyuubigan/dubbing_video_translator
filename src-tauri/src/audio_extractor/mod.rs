@@ -82,7 +82,6 @@ mod tests {
         let cfg = PipelineConfig {
             input_path: video_path.to_string_lossy().to_string(),
             output_format: "mp4".to_string(),
-            gguf_model_path: None,
             ffmpeg_path: None,
             enable_dubbing: false,
             mix_volume: 1.0,

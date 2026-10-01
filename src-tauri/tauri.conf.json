@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
 "productName": "DeeDub",
   "mainBinaryName": "deedub",
-  "version": "26.9.1",
+  "version": "26.9.4",
   "identifier": "com.deedub.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -24,15 +24,24 @@
       "csp": null
     }
   },
-  "plugins": {
+"plugins": {
     "speech": {
       "default_engine_dir": "D:\\nn\\crispasr",
       "default_models_dir": "D:\\nn\\models\\tts"
+    },
+    "llama-engine": {
+      "data_dir_name": "com.deedub.desktop"
+    },
+    "logs": {
+      "last_logs": true,
+      "log_file_name": "deedub.log"
     }
   },
 "bundle": {
     "active": false,
-    "resources": [],
+    "resources": {
+      "redist/*": "redist/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

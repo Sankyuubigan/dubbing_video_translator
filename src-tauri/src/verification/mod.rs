@@ -1,5 +1,7 @@
 use crate::comm::{PipelineContext, SubtitleChunk, SKIP_MARKER};
+use crate::llm::{message, LlmSession};
 use anyhow::Result;
+use tauri_plugin_llama_engine::engine::LlmMessage;
 
 /// Эмпирическая норма: ≤ 20 символов на секунду речи (Netflix ~42 символа
 /// на строку, строка ≈ 2 сек). Точность: 10% запас (22 симв/сек) чтобы
@@ -64,7 +66,7 @@ pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
         .map(|c| en_matching(c, src))
         .collect();
 
-    let mut model_path: Option<String> = None;
+    let mut session: Option<LlmSession> = None;
     let mut ok_count = 0;
     let mut retry_count = 0;
     let mut fail_count = 0;
@@ -92,22 +94,18 @@ pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
             en.chars().take(60).collect::<String>(),
         );
 
-        let mp = match model_path.clone().or_else(|| ctx.config.gguf_model_path.clone()) {
-            Some(p) => {
-                model_path = Some(p.clone());
-                p
-            }
-            None => {
-                chunk.text = SKIP_MARKER.to_string();
-                fail_count += 1;
-                log::warn!("VERIFY: [{}] FAIL (нет модели) → {}", i, SKIP_MARKER);
-                prev_pairs.push((en.to_string(), chunk.text.clone()));
-                if prev_pairs.len() > 3 {
-                    prev_pairs.remove(0);
-                }
-                continue;
-            }
-        };
+        // Движок поднимаем только когда реально понадобился ретрай: обычно
+        // верификация проходит без единого обращения к LLM (desktop §6.5).
+        if session.is_none() {
+            let app = crate::app_handle().ok_or_else(|| {
+                anyhow::anyhow!("AppHandle не инициализирован — ретрай перевода невозможен")
+            })?;
+            log::info!(
+                "VERIFY: есть бракованные чанки — поднимаем движок LLM для ретраев"
+            );
+            session = Some(LlmSession::open(app).map_err(anyhow::Error::msg)?);
+        }
+        let session = session.as_ref().expect("сессия LLM открыта выше");
 
         let gender = extract_gender(&ctx, chunk);
         // lookahead: до 3 будущих EN-чанков
@@ -123,13 +121,11 @@ pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
 
         for attempt in 0..2 {
             let temp = if attempt == 0 { 0.2 } else { 0.1 };
-            let seed = 42 + i as u32 * 10 + attempt as u32;
-            let prompt = build_strict_prompt(en, &gender, &prev_pairs, &next_ens);
-            let raw = crate::llm::generate_once(&mp, &prompt, temp, seed);
-            let cleaned = match raw {
-                Ok(r) => crate::translation::clean_output(&r),
+            let messages = build_strict_messages(en, &gender, &prev_pairs, &next_ens);
+            let cleaned = match session.generate(&messages, Some(temp)) {
+                Ok(generation) => crate::translation::clean_output(&generation.text),
                 Err(e) => {
-                    log::warn!("VERIFY: [{}] attempt {} generate error: {:#}", i, attempt, e);
+                    log::warn!("VERIFY: [{}] attempt {} generate error: {}", i, attempt, e);
                     String::new()
                 }
             };
@@ -163,6 +159,10 @@ pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
             prev_pairs.remove(0);
         }
     }
+
+    // Движок (если поднимался) освобождает VRAM при выходе из функции —
+    // до этапа TTS (desktop §6.5).
+    drop(session);
 
     log::info!(
         "VERIFY: итог OK={} RETRY={} FAIL={} (из {})",
@@ -338,43 +338,46 @@ fn extract_gender(ctx: &PipelineContext, chunk: &SubtitleChunk) -> String {
 }
 
 /// Строгий промпт (без CoT): модель отвечает сразу переводом, без
-/// «давайте подумаю», без ревизий и вариантов. Temp 0.2 = детерминированно.
-fn build_strict_prompt(
+/// «давайте подумаю», без ревизий и вариантов. Низкая температура =
+/// детерминированно.
+fn build_strict_messages(
     en_text: &str,
     gender: &str,
     prev: &[(String, String)],
     next: &[String],
-) -> String {
+) -> Vec<LlmMessage> {
     let speaker_gender = if gender == "female" { "Female" } else if gender == "male" { "Male" } else { "Person" };
 
-    let mut p = String::from(
-        "<|turn>system\n\
-        You are an expert audiovisual translator adapting English subtitles into Russian for voiceover.\n\n\
-        STRICT RULES:\n\
-        1. Output ONLY the final Russian translation. No explanations, no variants, no quotation marks, no markdown.\n\
-        2. Fix Speech-to-Text errors contextually.\n\
-        3. Keep Russian as short as the English so it fits the audio timing.\n\
-        4. GENDER: Current speaker is ").to_string();
-    p.push_str(speaker_gender);
-    p.push_str(". Match verbs/adjectives.\n\
-        5. NO CENSORSHIP: preserve slang and profanity.\n<turn|>\n\
-        <|turn>user\n");
+    let mut system = String::from(
+        "You are an expert audiovisual translator adapting English subtitles into Russian for voiceover.\n\n\
+         STRICT RULES:\n\
+         1. Output ONLY the final Russian translation. No explanations, no variants, no quotation marks, no markdown.\n\
+         2. Fix Speech-to-Text errors contextually.\n\
+         3. Keep Russian as short as the English so it fits the audio timing.\n\
+         4. GENDER: Current speaker is ",
+    );
+    system.push_str(speaker_gender);
+    system.push_str(
+        ". Match verbs/adjectives.\n\
+         5. NO CENSORSHIP: preserve slang and profanity.",
+    );
 
+    let mut user = String::new();
     if !prev.is_empty() {
-        p.push_str("\nPrevious context:\n");
+        user.push_str("Previous context:\n");
         for (en, ru) in prev.iter().rev() {
-            p.push_str(&format!("EN: {}\nRU: {}\n", en, ru));
+            user.push_str(&format!("EN: {}\nRU: {}\n", en, ru));
         }
     }
     if !next.is_empty() {
-        p.push_str("\nFuture context (DO NOT translate yet):\n");
+        user.push_str("\nFuture context (DO NOT translate yet):\n");
         for en in next.iter() {
-            p.push_str(&format!("EN: {}\n", en));
+            user.push_str(&format!("EN: {}\n", en));
         }
     }
+    user.push_str(&format!("\nTranslate ONLY this line:\nEN: {}\n", en_text));
 
-    p.push_str(&format!("\nTranslate ONLY this line:\nEN: {}\n<turn|>\n<|turn>model\n", en_text));
-    p
+    vec![message("system", system), message("user", user)]
 }
 
 #[cfg(test)]

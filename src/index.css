@@ -27,9 +27,18 @@ body {
 }
 
 #root {
+  padding: 40px 20px;
+}
+
+/* Ширина контента — на .app, а не на #root: вкладка «Логи» вешает .app-wide
+   и растягивается на всё окно (логи читаются по горизонтали). */
+.app {
   max-width: 680px;
   margin: 0 auto;
-  padding: 40px 20px;
+}
+
+.app-wide {
+  max-width: none;
 }
 
 h1 {
@@ -63,15 +72,25 @@ h1 {
   margin-bottom: 8px;
 }
 
+/* Токены темы для Web Components плагинов my-tauri-plugins: они читают их
+   внутри shadow DOM. Контракт — my-tauri-plugins/PLUGIN_STANDARD.md. */
 .settings speech-engine-panel,
 .settings speech-models-panel,
-.settings speech-voice-storage {
+.settings speech-voice-storage,
+.settings llama-engine-panel,
+.settings llama-download-panel,
+.settings llama-models-panel,
+.logs-panel logs-panel {
   --text: var(--text-h);
   --text-muted: var(--text);
   --border: var(--border);
   --bg-color: var(--surface);
+  --bg-elevated: var(--surface);
   --session-hover: var(--surface-hover);
   --primary: var(--accent);
   --primary-hover: #7c4df0;
+  --danger: var(--red);
+  --success: var(--green);
   --font: var(--font);
+  --mono-font: "Consolas", "Cascadia Mono", monospace;
 }

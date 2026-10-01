@@ -2,9 +2,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Конфиг приложения. Выбор LLM-модели здесь НЕ хранится: он живёт в
+/// конфиге плагина `tauri-plugin-llama-engine` (`app_config.json`, ключ
+/// `last_model`) — единый источник правды (core §2.1). Старый ключ
+/// `gguf_model_path` в файле пользователя просто игнорируется serde.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub gguf_model_path: Option<String>,
     pub output_format: String,
     pub ffmpeg_path: Option<String>,
     pub enable_dubbing: bool,
@@ -17,7 +20,6 @@ fn default_mix_volume() -> f64 { 0.15 }
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            gguf_model_path: None,
             output_format: "mp4".to_string(),
             ffmpeg_path: None,
             enable_dubbing: false,

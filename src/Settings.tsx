@@ -1,4 +1,5 @@
 import "@my-tauri-plugins/plugin-speech";
+import "@my-tauri-plugins/plugin-llama-engine";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface SettingsProps {
@@ -20,6 +21,21 @@ export default function Settings({ ffmpegPath, setFfmpegPath }: SettingsProps) {
   return (
     <div className="settings">
       <h1>Настройки</h1>
+
+      <div className="card">
+        <label>Движок перевода (LLM)</label>
+        <llama-engine-panel />
+      </div>
+
+      <div className="card">
+        <label>Локальные модели перевода</label>
+        <llama-models-panel />
+      </div>
+
+      <div className="card">
+        <label>Скачать модель перевода из каталога</label>
+        <llama-download-panel />
+      </div>
 
       <div className="card">
         <label>Движок CrispASR</label>
