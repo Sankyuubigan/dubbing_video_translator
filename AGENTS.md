@@ -113,12 +113,20 @@ EN: source text
 
 ### Генерация
 - Контекст: 8192 токенов (`llm.rs: CONTEXT_SIZE`), передаётся движку при старте
-- Бюджет: `n_predict = токены_ответа`, где ответ = `(prompt/2).clamp(64, 512)`
+- Бюджет: `n_predict = MAX_ANSWER_TOKENS` (512) — **константный потолок**, не функция
+  от промпта (`llm.rs: generate`)
   - Резерв «на размышления» не нужен: думатель выключен (см. Prompt format)
-- Замер (ролик 192 с / 38 чанков, RTX 4070 Ti SUPER, полный оффлоад):
-  - `translate: 47.7s` — **~1.25 с на чанк**, все запросы по EOS, 0 токенов думателя
-  - `verify: 6.8s` (OK=36 RETRY=2 FAIL=0), `tts: 118.1s`, **TOTAL 186.3s**
-  - 14 чанков на `tts_60s.mp4`: `translate: 15.1s` (было 348.7s при бюджете 1500)
+  - Потолок не влияет на сэмплирование: он ограничивает только момент остановки,
+    а она и так по EOS (замер: средний ответ 22 токена, `stop_reason=EOS`)
+  - Раньше бюджет считался как `clamp(prompt_tokens/2, 64, 512)`, но точное число
+    токенов бралось отдельным HTTP-запросом `POST /tokenize` на КАЖДЫЙ чанк. Теперь
+    вместимость промпта в контекст проверяется по **консервативной верхней оценке
+    из символов** (`prompt_tokens_upper_bound`: токен не короче символа + 32 токена
+    на сообщение — ложное «поместится» невозможно), а фактическое число токенов
+    сверяется по `result.metrics.prompt_tokens` из ответа движка.
+- Замер (ролик 192 с / 38 чанков, RTX 4070 Ti SUPER, полный оффлоад, 03.10.26):
+  - `translate: 32.4s`, `verify: 2.5s` (OK=36 RETRY=2 FAIL=0), `tts: 52.1s`,
+    **TOTAL 99.6s** (было 177.5s — см. `tasks/03.10.26 Ускорение пайплайна дубляжа.md`)
 - **Почему думатель выключен:** при бюджете 1500 модель писала 600-1500 токенов
   рассуждений на каждый чанк (на «Bam. Right now.» — 611 токенов думателя) →
   25-30 с на реплику, 238 чанков ≈ 100 минут. Выигрыша в качестве не было:
@@ -127,6 +135,13 @@ EN: source text
   закрытию `<channel|>` ограничивал весь вывод 64-512 токенами
 - Отмена пайплайна передаётся в движок напрямую (`Arc<AtomicBool>` в
   `generate_chat`), так что отмена работает и на середине генерации
+
+### Одна LLM-сессия на translate + verify
+`translate_with_session` возвращает живой `LlmSession` наружу, `verify_with_session`
+принимает его и уничтожает на выходе (`pipeline.rs`). Раньше `translate` ронял
+сессию на границе фаз, а `verify` поднимал **второй** `llama-server.exe` (~5 с
+загрузки 6.5 ГиБ в VRAM) ради десятка запросов по бракованным чанкам.
+Сессия умирает строго ДО старта TTS — VRAM освобождается по desktop §6.5.
 
 ## TTS Module (`src-tauri/src/tts/mod.rs`)
 
@@ -143,6 +158,35 @@ EN: source text
 - Деклик: `declick_spikes` — сглаживание 1-сэмпловых выбросов в финальных сэмплах (O(n), без перегенераций). Клики — артефакт base (фикстуры ч.3/ч.27 сняты с её прогонов 17.09 01:58, до установки RL).
 - **Оба включаются строго по бэкенду:** `attempt_count = if tts_backend == "cosyvoice3-tts" { TTS_MAX_ATTEMPTS } else { 1 }`, `if tts_backend == "cosyvoice3-tts" { declick_spikes(...) }`.
 - Сейчас пресета `cosyvoice3-tts` в JSON нет → оба костыля фактически выключены. Оставлены в коде на будущее: если base вернётся в плагинский `speech_models.json`, retry и declick восстановятся автоматически. RL синтезирует 1 попыткой (seed=None) и без кликов → костыли для неё — zero overhead.
+
+### Обход PASS 1 ПО СПИКЕРАМ (обязательное правило)
+Движок cosyvoice3 в CrispASR получает клон-референс **только** из CLI-аргумента
+`--voice <ref.wav>` при старте процесса. Смена голоса на конкретный запрос не
+поддерживается: внутренний `cosyvoice3_tts::synth` умеет только 8 голосов из
+`voices.gguf` и печатает `voice '%s' not found (have %zu)`, а WAV-клон идёт другим
+путём — `synth_from_wav` от стартового `--voice`. Значит **один запуск движка = один голос**.
+
+Поэтому PASS 1 обходит чанки **по спикерам** (`speaker_order` + `speaker_chunks`),
+а не по хронологии. На тестовом ролике (4 спикера, 12 переключений): 4 запуска
+движка вместо 13, TTS 119.9 с → 52.1 с. На 22-минутном ролике (8 спикеров,
+46 переключений) было 47 запусков, станет 8.
+
+**На результат не влияет:** чанк `i` синтезируется из тех же данных (текст +
+голос), а PASS 2 (`plan_timeline`) и PASS 3 (`place_samples`) работают по исходному
+`index` в хронологическом порядке. **Хронологический обход PASS 1 возвращать
+нельзя** — это ровно то, из-за чего движок перезапускался на каждой смене голоса.
+
+Телеметрия в логе: `TTS: синтез N чанков, M спикер(ов), K переключений в хронологии
+→ M запусков движка` и `TTS: движок запущен M раз, сумма генерации по движку Xs`.
+
+### Подгонка и ресемплинг — один проход FFmpeg
+`fit_and_resample_wav(input, output, tempo, out_sr, ffmpeg)` объединяет
+`rubberband=tempo=…` (подгонка длительности) и `-ar … -ac 1` (24 кГц → 44.1 кГц)
+в ОДИН запуск FFmpeg на чанк. Раньше это были два последовательных прохода плюс
+промежуточный файл `deedub_tts_stretched_<N>.wav` (файла больше нет).
+`tempo > 1.02` — единственное условие включения rubberband: планировщик отдаёт
+ровно 1.0, когда речь влезает в окно натуральной скоростью, и >1 только когда
+нужно ужимать.
 
 ## Build & Release (Tauri Build Toolkit)
 
@@ -163,9 +207,13 @@ Read-only диагностика: `node ..\my-tauri-plugins\tauri-build-toolkit\
 REM Dev-сборка: prep (бамп версии + npm install + иконки) + tauri build без бандла + запуск deedub.exe
 build.bat
 
-REM Unit-тесты: cargo test [фильтр] (компиляция+прогон; харнесс на этой машине
-REM не стартует — 0xc0000139, поэтому есть test_release.bat с release-профилем)
+REM Unit-тесты: cargo test [фильтр] (компиляция+прогон)
 test.bat
+REM То же в release-профиле. ВАЖНО: харнесс cargo test на этой машине не
+REM стартует ни в debug, ни в release — 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND
+REM (ошибка загрузчика ДО выполнения тестов). Поэтому рабочими точками
+REM проверки TTS-логики остаются отдельные бинарники build_test_retry /
+REM build_test_declick + полный run_tts_pipeline.
 test_release.bat
 
 REM Установщик NSIS: prep + tauri build --bundles nsis + верификация установщика и .sig
@@ -174,7 +222,7 @@ generate_installer.bat
 REM Полный релиз на GitHub: build + sign + gh release + latest.json + commit/push
 release.bat
 
-REM Полный pipeline-тест (TTS-дубляж, сохраняет raw/stretched/final WAV в temp/)
+REM Полный pipeline-тест (TTS-дубляж, сохраняет raw/final WAV в temp/)
 run_tts_pipeline.bat
 
 REM Полный pipeline-тест без дубляжа
@@ -195,12 +243,12 @@ build_test_retry.bat
 |------|---------|
 | `build.bat` | Toolkit: dev build (`prep` + `npx tauri build` без бандла + запуск `deedub.exe`) |
 | `test.bat` | Toolkit: `cargo test [фильтр]` (компиляция + прогон unit-тестов) |
-| `test_release.bat` | `cargo test --release` — обход падения debug-харнесса на этой машине |
+| `test_release.bat` | Toolkit: `cargo test --release`. Обёртка над `test.bat --release` (флаг cargo, проброшен тулкитом). **На этой машине харнесс не стартует даже в release** — 0xc0000139; для проверки TTS-логики используй `build_test_retry.bat` / `build_test_declick.bat` / `run_tts_pipeline.bat` |
 | `generate_installer.bat` | Toolkit: сборка NSIS-установщика + верификация `.sig` |
 | `release.bat` | Toolkit: полный релиз (build + sign + `gh release` + `latest.json` + commit/push) |
 | `.build-config.json` | Конфиг тулкита (repo, appExe, productName, signing, ...) |
 | `run_pipeline.bat` | Full pipeline test (no dubbing) |
-| `run_tts_pipeline.bat` | Full pipeline with TTS dubbing, keeps raw/stretched/final WAVs (`DEEDUB_KEEP_TTS_WAV=1`) |
+| `run_tts_pipeline.bat` | Full pipeline with TTS dubbing on `test/test_TTS_dubbing.mp4`, keeps raw/final WAVs (`DEEDUB_KEEP_TTS_WAV=1`) |
 | `build_test_pipeline.bat` | Compile `test-pipeline` binary |
 | `build_test_declick.bat` | Build+run `test-tts-declick`: red test for base-костыля click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
 | `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
@@ -214,7 +262,7 @@ build_test_retry.bat
 ### Output files (проектные папки, core §1.2)
 - Video with subtitles: `test/<name>_subbed.mp4` (рядом с исходником)
 - Dubbed WAV: `temp/deedub_dubbed.wav`
-- Per-chunk raw/stretched/final WAV: `temp/deedub_tts_{raw,stretched,final}_<N>.wav`
+- Per-chunk raw/final WAV: `temp/deedub_tts_{raw,final}_<N>.wav` (промежуточного `stretched` больше нет — rubberband и ресемплинг идут одним проходом FFmpeg)
 - English SRT: `temp/deedub_subtitles_en.srt`
 - Russian SRT: `temp/deedub_subtitles_ru.srt`
 - Session log: `test/last_logs.txt` (зеркало от `tauri-plugin-logs`), рядом с exe — `deedub.log`

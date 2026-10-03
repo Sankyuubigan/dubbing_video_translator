@@ -73,6 +73,15 @@ fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
 
 /// Определяет пол для каждого уникального спикера на основе высоты тона.
 /// Порог: < 160 Гц → male, >= 160 Гц → female.
+/// Сколько сегментов на спикера берём для оценки тона (самые длинные).
+/// Медиана основного тона — устойчивая оценка: трёх самых длинных реплик
+/// достаточно, а короткие вставки («yeah», «uh») как раз её ломают. Раньше
+/// автокорреляция гонялась по ВСЕМ сегментам ролика — десятки секунд CPU в
+/// один поток, уже после того как движок освободил видеопамять.
+const PITCH_SEGMENTS_PER_SPEAKER: usize = 3;
+
+/// Определяет пол для каждого уникального спикера на основе высоты тона.
+/// Порог: < 160 Гц → male, >= 160 Гц → female.
 fn detect_speaker_genders(
     wav_path: &str,
     speaker_segments: &[SpeakerSegment],
@@ -85,39 +94,48 @@ fn detect_speaker_genders(
         }
     };
 
-    let mut speaker_genders: HashMap<String, Vec<f64>> = HashMap::new();
-
+    // Спикер → окна [start, end) в сэмплах, отсортированные по убыванию длины.
+    let mut by_speaker: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for seg in speaker_segments {
-        let start_sample = (seg.start_sec * sample_rate as f64) as usize;
-        let end_sample = (seg.end_sec * sample_rate as f64) as usize;
-        if end_sample > samples.len() || start_sample >= end_sample {
+        let start = (seg.start_sec * sample_rate as f64) as usize;
+        let end = (seg.end_sec * sample_rate as f64) as usize;
+        if end > samples.len() || start >= end {
             continue;
         }
-        let seg_samples = &samples[start_sample..end_sample];
-        if let Some(pitch) = estimate_median_pitch(seg_samples, sample_rate) {
-            speaker_genders
-                .entry(seg.speaker_id.clone())
-                .or_default()
-                .push(pitch);
-        }
+        by_speaker
+            .entry(seg.speaker_id.clone())
+            .or_default()
+            .push((start, end));
     }
 
     let mut result = HashMap::new();
-    for (speaker_id, pitches) in &speaker_genders {
+    for (speaker_id, mut windows) in by_speaker {
+        windows.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)));
+        let mut pitches: Vec<f64> = Vec::new();
+        for (start, end) in windows.iter().take(PITCH_SEGMENTS_PER_SPEAKER) {
+            if crate::is_cancelled() {
+                log::info!("GenderDetection: прервано пользователем");
+                return HashMap::new();
+            }
+            if let Some(pitch) = estimate_median_pitch(&samples[*start..*end], sample_rate) {
+                pitches.push(pitch);
+            }
+        }
         if pitches.is_empty() {
             continue;
         }
-        let mut sorted = pitches.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = sorted[sorted.len() / 2];
+        pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = pitches[pitches.len() / 2];
         let gender = if median < 160.0 { "male" } else { "female" };
         log::info!(
-            "GenderDetection: {} median pitch={:.0} Hz → {}",
+            "GenderDetection: {} median pitch={:.0} Hz → {} ({} сегм. из {})",
             speaker_id,
             median,
-            gender
+            gender,
+            pitches.len(),
+            windows.len()
         );
-        result.insert(speaker_id.clone(), gender.to_string());
+        result.insert(speaker_id, gender.to_string());
     }
     result
 }
@@ -309,6 +327,7 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
         .arg("--diarize-embedder")
         .arg("auto")
         .arg("--auto-download")
+        .arg("--verbose")
         .arg("-ojf")
         .arg("-of")
         .arg(&prefix)
@@ -340,7 +359,13 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
 
     let parsed = parse_engine_diarization(&json_path);
     let _ = std::fs::remove_file(&json_path);
-    let _ = std::fs::remove_file(&stderr_log);
+    // stderr движка НЕ удаляем: это единственный источник попутной разбивки
+    // по стадиям (`--verbose`), и без него фазовые тайминги диаризации
+    // нечем диагностировать после прогона. Путь пишется в лог.
+    log::info!(
+        "Diarization: отчёт движка сохранён — {}",
+        stderr_log.display()
+    );
     if parsed.is_none() {
         log::warn!("Diarization: движок завершился успешно, но JSON без сегментов");
     }

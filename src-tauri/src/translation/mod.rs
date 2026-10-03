@@ -310,7 +310,16 @@ fn merge_interjections(chunks: &[SubtitleChunk]) -> Vec<SubtitleChunk> {
     merged
 }
 
-pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
+/// Переводит чанки и возвращает вместе с контекстом ЖИВУЮ сессию движка.
+///
+/// Сессия возвращается наружу не «на всякий случай», а потому что следующий
+/// этап (`verification`) — тоже LLM-этап: раньше он поднимал ВТОРОЙ
+/// `llama-server.exe` (5 с загрузки 6.5 ГиБ в VRAM) ради десятка запросов по
+/// бракованным чанкам. Теперь один процесс живёт на оба этапа, а `drop`
+/// сессии происходит строго до старта TTS — VRAM освобождается по desktop §6.5.
+pub fn translate_with_session(
+    ctx: PipelineContext,
+) -> Result<(PipelineContext, Option<LlmSession>)> {
     let chunks_src = match ctx.subtitle_chunks.as_ref() {
         Some(c) => c,
         None => {
@@ -333,7 +342,6 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
     );
 
     // Сессия движка на весь этап: один запуск llama-server, по чанку — запрос.
-    // При выходе из функции движок дропается и VRAM освобождается до TTS.
     let app = crate::app_handle()
         .ok_or_else(|| anyhow::anyhow!("AppHandle не инициализирован — движок LLM недоступен"))?;
     let session = LlmSession::open(app).map_err(anyhow::Error::msg)?;
@@ -441,10 +449,13 @@ pub fn translate(ctx: PipelineContext) -> Result<PipelineContext> {
     }
 
     log::info!("Перевод: готово {} чанков", result.len());
-    Ok(PipelineContext {
-        translated_chunks: Some(result),
-        ..ctx
-    })
+    Ok((
+        PipelineContext {
+            translated_chunks: Some(result),
+            ..ctx
+        },
+        Some(session),
+    ))
 }
 
 #[cfg(test)]

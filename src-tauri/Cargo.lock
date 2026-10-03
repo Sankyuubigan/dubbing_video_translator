@@ -1739,24 +1739,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glint-audio"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df09912ed6bd5062c86fd42b646de28c5727f4fb8e2c2adbd58e9465dff8cc12"
-dependencies = [
- "glint-audio-sys",
-]
-
-[[package]]
-name = "glint-audio-sys"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8c79457db4164f6fe521359cb4aba0f25e32c5094d8d0214a98a2242dda4ac6"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3851,6 +3833,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_mp3"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2f55a456c3ee21793595c31f1e89419172e556bbb35390f2a39569c09f5a2db"
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4892,7 +4880,6 @@ dependencies = [
  "audioadapter-buffers",
  "chrono",
  "futures",
- "glint-audio",
  "hound",
  "log",
  "nnnoiseless",
@@ -4900,6 +4887,7 @@ dependencies = [
  "opus",
  "reqwest 0.12.28",
  "rubato",
+ "rusty_mp3",
  "serde",
  "serde_json",
  "symphonia",

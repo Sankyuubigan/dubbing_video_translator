@@ -59,6 +59,21 @@ pub struct LlmSession {
     model_path: String,
 }
 
+/// Консервативная ВЕРХНЯЯ оценка числа токенов промпта без токенизатора и без
+/// сетевого запроса: ни один токен не короче одного символа, плюс запас на
+/// служебные маркеры ролей и шаблон чата.
+///
+/// Это доказуемый потолок, а не «~3 симв/токен»: ложное «поместится» здесь
+/// невозможно, поэтому проверка вместимости в контекст безопасна. Точное число
+/// токенов движок всё равно отдаёт в метриках ответа — сверяем там.
+fn prompt_tokens_upper_bound(messages: &[LlmMessage]) -> usize {
+    const PER_MESSAGE_OVERHEAD: usize = 32;
+    messages
+        .iter()
+        .map(|m| m.content.chars().count() + PER_MESSAGE_OVERHEAD)
+        .sum()
+}
+
 impl LlmSession {
     /// Поднимает движок на активной модели (её выбирает пользователь в
     /// Настройках → «Локальные модели перевода»; выбранная модель хранится
@@ -149,20 +164,29 @@ impl LlmSession {
             params.temperature = temp;
         }
 
-        // Бюджет генерации: n_predict ограничивает только ОТВЕТ — думатель
-        // выключен (REASONING_BUDGET = 0), поэтому резервировать токены «на
-        // размышления» не нужно. Потолок не стоит генерации: llama-server
-        // останавливается на EOS сам.
-        let prompt_tokens = self.engine.get_tokens_count(messages, "Auto").unwrap_or(0);
-        let answer_tokens = (prompt_tokens / 2).clamp(MIN_ANSWER_TOKENS, MAX_ANSWER_TOKENS);
-        let context_left = CONTEXT_SIZE as usize - prompt_tokens - CONTEXT_RESERVE;
-        if context_left <= answer_tokens {
+        // Бюджет ОТВЕТА — константный потолок, а не функция от промпта.
+        //
+        // Думатель выключен (REASONING_BUDGET = 0), llama-server останавливается
+        // на EOS сам: замер на 238 чанках — средний ответ 22 токена, все EOS,
+        // stop_reason=EOS. Раньше бюджет считался как
+        // `clamp(prompt_tokens/2, 64, 512)`, но ТОЧНОЕ число токенов бралось
+        // отдельным HTTP-запросом `POST /tokenize` на КАЖДЫЙ чанк (плюс два
+        // чтения 5 МиБ заголовка GGUF на стороне плагина) — ради потолка,
+        // который заведомо не достигается. Потолок не влияет на сэмплирование:
+        // он ограничивает только момент остановки, а она и так по EOS.
+        //
+        // Вместимость промпта в контекст проверяется по консервативной верхней
+        // оценке из символов (без сети); фактическое число токенов сверяется по
+        // метрикам ответа ниже.
+        let prompt_tokens_bound = prompt_tokens_upper_bound(messages);
+        let context_left = CONTEXT_SIZE as usize - prompt_tokens_bound - CONTEXT_RESERVE;
+        let max_new = MAX_ANSWER_TOKENS.min(context_left);
+        if max_new < MIN_ANSWER_TOKENS {
             return Err(format!(
-                "Промпт не помещается в контекст модели ({} токенов при CONTEXT_SIZE={})",
-                prompt_tokens, CONTEXT_SIZE
+                "Промпт не помещается в контекст модели (>= {} токенов при CONTEXT_SIZE={})",
+                prompt_tokens_bound, CONTEXT_SIZE
             ));
         }
-        let max_new = (answer_tokens + REASONING_BUDGET as usize).min(context_left);
 
         let result = self.engine.generate_chat(
             messages,
@@ -176,6 +200,17 @@ impl LlmSession {
             |_, _| {},
             |msg: String| log::info!("{}", msg),
         )?;
+
+        let prompt_tokens = result.metrics.prompt_tokens as usize;
+        if prompt_tokens > prompt_tokens_bound {
+            log::warn!(
+                "LLM[{}]: верхняя оценка промпта меньше факта: {} < {} токенов — \
+                 проверка вместимости в контекст недооценивает",
+                self.model_path(),
+                prompt_tokens_bound,
+                prompt_tokens
+            );
+        }
 
         log::debug!(
             "LLM[{}]: {} токенов промпта, {} токенов ответа, stop_reason={}",

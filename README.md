@@ -69,7 +69,7 @@ test.bat
 Пайплайн-тесты:
 
 ```batch
-REM Полный pipeline-тест с TTS-дубляжом (сохраняет raw/stretched/final WAV в temp/)
+REM Полный pipeline-тест с TTS-дубляжом (сохраняет raw/final WAV в temp/)
 run_tts_pipeline.bat
 
 REM Полный pipeline-тест без дубляжа
@@ -102,13 +102,13 @@ Env-переменные (диагностика/разработка):
 | `DEEDUB_STT_MODEL` | Явный путь к STT-модели |
 | `DEEDUB_TTS_PRESET` | TTS-пресет (headless A/B) |
 | `DEEDUB_TEST_VIDEO` | Авто-запуск пайплайна на старте приложения |
-| `DEEDUB_KEEP_TTS_WAV` | Не удалять raw/stretched/final WAV чанков |
+| `DEEDUB_KEEP_TTS_WAV` | Не удалять raw/final WAV чанков |
 
 ### Выходные файлы
 
 - Субтитры в видео: `test/<name>_subbed.mp4`
 - Дубляж: `temp/deedub_dubbed.wav`
-- Чанки: `temp/deedub_tts_{raw,stretched,final}_<N>.wav`
+- Чанки: `temp/deedub_tts_{raw,final}_<N>.wav`
 - Английские/русские субтитры: `temp/deedub_subtitles_{en,ru}.srt`
 - Лог сессии: `test/last_logs`
 
@@ -181,7 +181,7 @@ Dev env vars: `DEEDUB_STT_MODEL`, `DEEDUB_TTS_PRESET`, `DEEDUB_TEST_VIDEO`, `DEE
 
 - Subbed video: `test/<name>_subbed.mp4`
 - Dub: `temp/deedub_dubbed.wav`
-- Per-chunk WAVs: `temp/deedub_tts_{raw,stretched,final}_<N>.wav`
+- Per-chunk WAVs: `temp/deedub_tts_{raw,final}_<N>.wav`
 - SRTs: `temp/deedub_subtitles_{en,ru}.srt`
 - Session log: `test/last_logs`
 

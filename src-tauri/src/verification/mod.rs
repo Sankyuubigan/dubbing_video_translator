@@ -39,7 +39,18 @@ const GARBAGE_MARKERS: &[&str] = &[
     "Вариант для озвучки",
 ];
 
-pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
+/// Проверяет изохронию/мусор в переводе и чинит брак ретраями.
+///
+/// Принимает сессию движка, оставшуюся от `translate`: оба этапа — LLM-этапы,
+/// и поднимать второй `llama-server.exe` ради десятка запросов означало лишние
+/// ~5 с загрузки модели в VRAM. Если сессии нет (этап вызван отдельно) — она
+/// поднимается лениво, как раньше. Сессия уничтожается на выходе, то есть
+/// строго ДО старта TTS (desktop §6.5).
+pub fn verify_with_session(
+    ctx_and_session: (PipelineContext, Option<LlmSession>),
+) -> Result<PipelineContext> {
+    let (mut ctx, mut session) = ctx_and_session;
+
     let mut chunks = match std::mem::take(&mut ctx.translated_chunks) {
         Some(c) => c,
         None => {
@@ -66,15 +77,22 @@ pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
         .map(|c| en_matching(c, src))
         .collect();
 
-    let mut session: Option<LlmSession> = None;
     let mut ok_count = 0;
     let mut retry_count = 0;
     let mut fail_count = 0;
-    // Последние 3 обработанных пары (EN, RU) — для prev-контекста строгого ретрая
+    // Последние 3 обработанные пары (EN, RU) — для prev-контекста строгого ретрая
     let mut prev_pairs: Vec<(String, String)> = Vec::new();
 
     for (i, chunk) in chunks.iter_mut().enumerate() {
+        if crate::is_cancelled() {
+            log::warn!("VERIFY: отменено пользователем на чанке {}", i);
+            return Ok(PipelineContext {
+                translated_chunks: Some(chunks),
+                ..ctx
+            });
+        }
         let en = matched_en.get(i).map(|s| s.as_str()).unwrap_or("");
+
         let duration = chunk.end_sec - chunk.start_sec;
         let issues = assess(&chunk.text, en, duration);
 
@@ -96,6 +114,7 @@ pub fn verify(mut ctx: PipelineContext) -> Result<PipelineContext> {
 
         // Движок поднимаем только когда реально понадобился ретрай: обычно
         // верификация проходит без единого обращения к LLM (desktop §6.5).
+        // Чаще всего сессия уже есть — её оставил `translate`.
         if session.is_none() {
             let app = crate::app_handle().ok_or_else(|| {
                 anyhow::anyhow!("AppHandle не инициализирован — ретрай перевода невозможен")

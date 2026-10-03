@@ -1,8 +1,11 @@
 @echo off
 setlocal enableextensions
 
-set "PROJ=%~dp0"
-if not exist "%PROJ%src-tauri\tauri.conf.json" (
+REM %~dp0 ends with a backslash. Passing it as --project "%PROJ%" makes
+REM the C runtime swallow the NEXT argument (and leaves a stray quote
+REM inside the path). %%~fI normalizes it without a trailing slash.
+for %%I in ("%~dp0.") do set "PROJ=%%~fI"
+if not exist "%PROJ%\src-tauri\tauri.conf.json" (
   echo [ERROR] This script must live in the project root, next to src-tauri\tauri.conf.json
   pause
   exit /b 1

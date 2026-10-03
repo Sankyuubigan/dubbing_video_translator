@@ -322,73 +322,49 @@ fn write_segment_wav(out: &str, sample_rate: u32, samples: &[i16]) -> Result<()>
 
 // --- FFmpeg помощники ---
 
-/// Применяет time-stretch через FFmpeg rubberband-фильтр.
-/// rubberband сохраняет pitch (голос не становится бурундуком),
-/// поддерживает ratio [0.25, 4.0].
-fn time_stretch_wav(
+/// Подгоняет WAV к нужной длительности (rubberband) и ресемплит в целевую
+/// частоту ОДНИМ проходом FFmpeg.
+///
+/// Раньше это были два последовательных прохода на каждый чанк — сначала
+/// `rubberband`, потом `-ar`: 2×Nspawns движка ffmpeg плюс два лишних
+/// файла на диске. Оба фильтра независимы, поэтому объединяются в одну
+/// команду: `-filter:a rubberband=tempo=… -ar … -ac 1`.
+///
+/// `tempo` — коэффициент скорости речи (текущая/целевая длительность).
+/// rubberband сохраняет pitch (голос не становится бурундуком), диапазон
+/// [0.25, 4.0]. Планировщик отдаёт 1.0, когда речь влезает в окно
+/// натуральной скоростью, и >1 только когда нужно ужимать (см.
+/// `plan_timeline`), поэтому фильтр включается при tempo > 1.02.
+fn fit_and_resample_wav(
     input_wav: &str,
     output_wav: &str,
-    target_duration_sec: f64,
-    current_duration_sec: f64,
-    ffmpeg_path: &Option<String>,
-) -> Result<()> {
-    if current_duration_sec <= 0.0 || target_duration_sec <= 0.0 {
-        std::fs::copy(input_wav, output_wav).ok();
-        return Ok(());
-    }
-    let ratio = current_duration_sec / target_duration_sec;
-    let clamped = ratio.clamp(0.25, 4.0);
-    if (clamped - 1.0).abs() < 0.02 {
-        std::fs::copy(input_wav, output_wav)
-            .context("Ошибка копирования WAV")?;
-        return Ok(());
-    }
-    log::info!(
-        "TTS: rubberband ratio={:.2} (gen={:.1}s, target={:.1}s)",
-        clamped,
-        current_duration_sec,
-        target_duration_sec
-    );
-    let ffmpeg = crate::ffmpeg::resolve(ffmpeg_path);
-    let output = Command::new(&ffmpeg)
-        .creation_flags(CREATE_NO_WINDOW)
-        .arg("-y")
-        .arg("-i")
-        .arg(input_wav)
-        .arg("-filter:a")
-        .arg(format!("rubberband=tempo={:.4}", clamped))
-        .arg(output_wav)
-        .output()
-        .context("Ошибка запуска FFmpeg для rubberband")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("FFmpeg rubberband error: {}", stderr);
-    }
-    Ok(())
-}
-
-fn resample_wav(
-    input_wav: &str,
-    output_wav: &str,
+    tempo: f64,
     out_sample_rate: u32,
     ffmpeg_path: &Option<String>,
 ) -> Result<()> {
     let ffmpeg = crate::ffmpeg::resolve(ffmpeg_path);
-    let output = Command::new(&ffmpeg)
-        .creation_flags(CREATE_NO_WINDOW)
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.creation_flags(CREATE_NO_WINDOW)
         .arg("-y")
         .arg("-i")
-        .arg(input_wav)
+        .arg(input_wav);
+    if tempo > 1.02 {
+        let clamped = tempo.clamp(0.25, 4.0);
+        log::info!("TTS: rubberband ratio={:.2}", clamped);
+        cmd.arg("-filter:a")
+            .arg(format!("rubberband=tempo={:.4}", clamped));
+    }
+    let output = cmd
         .arg("-ar")
         .arg(out_sample_rate.to_string())
         .arg("-ac")
         .arg("1")
         .arg(output_wav)
         .output()
-        .context("Ошибка запуска FFmpeg для ресемплинга")?;
+        .context("Ошибка запуска FFmpeg для подгонки/ресемплинга")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("FFmpeg resample error: {}", stderr);
+        anyhow::bail!("FFmpeg fit/resample error: {}", stderr);
     }
     Ok(())
 }
@@ -663,11 +639,10 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
         tts_backend
     );
 
-    // Движок стартует ЛЕНИВО, на каждый спикер отдельно: cosyvoice3 синтезирует
-    // WAV-клон ТОЛЬКО из голоса, поданного при старте через `--voice <ref>`
-    // (имена, зарегистрированные через /v1/voices, бэкенд не резолвит —
-    // «voice not found (have 8)»). При смене спикера ensure() перезапускает движок
-    // с новым референсом.
+    // Движок cosyvoice3 получает клон-референс ТОЛЬКО из стартового `--voice
+    // <ref>` (имена из /v1/voices бэкенд не резолвит — «voice not found (have
+    // 8)»), поэтому один запуск движка = один голос. Отсюда обход PASS 1 по
+    // спикерам, а не по хронологии (см. PASS 1 ниже).
 
     // Preload исходный WAV (16 кГц mono) для вырезания референсов.
     let reader = hound::WavReader::open(wav_path)
@@ -687,14 +662,30 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
     let tmp_dir = crate::paths::temp_dir();
     let ffmpeg_path = ctx.config.ffmpeg_path.clone();
 
-    // Карта спикера → путь к стартовому референсу (24кГц).
+    // Карта спикера → путь к референсу (24кГц), передаваемый движку при старте.
     let mut voice_map: HashMap<String, PathBuf> = HashMap::new();
-    let mut current_startup_voice = String::new();
 
     // ---- PASS 1: синтез ВСЕХ чанков, без записи в холст ----
+    //
+    // Обход идёт ПО СПИКЕРАМ, а не по хронологии. cosyvoice3 в CrispASR берёт
+    // клон-референс ИСКЛЮЧИТЕЛЬНО из CLI-аргумента `--voice <ref.wav>` при старте
+    // процесса: смена голоса на конкретный запрос не поддерживается (внутренний
+    // `cosyvoice3_tts::synth` умеет только 8 голосов из voices.gguf и печатает
+    // «voice '%s' not found (have 8)», а WAV-клон идёт другим путём —
+    // `synth_from_wav` от стартового --voice). Значит один запуск движка = один
+    // голос, и хронологический обход, переключающий спикера туда-сюда, перезапускал
+    // процесс на КАЖДОЙ смене. Обход по спикерам даёт ровно N_спикеров запусков.
+    //
+    // На результат это не влияет: чанк i синтезируется из тех же данных (текст +
+    // голос), а PASS 2/PASS 3 обращаются к результатам по исходному индексу в
+    // хронологическом порядке.
     let mut synthesized: Vec<SynthesizedChunk> = Vec::new();
     let mut durations: Vec<f64> = vec![0.0; translated.len()];
 
+    let mut speaker_order: Vec<String> = Vec::new();
+    let mut speaker_chunks: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut prev_speaker: Option<String> = None;
+    let mut speaker_switches = 0usize;
     for (idx, chunk) in translated.iter().enumerate() {
         let text = chunk.text.trim();
         if text.is_empty() || text == crate::comm::SKIP_MARKER {
@@ -702,8 +693,36 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
         }
         let speaker_id = chunk
             .speaker_id
-            .as_deref()
-            .unwrap_or("Speaker_1");
+            .clone()
+            .unwrap_or_else(|| "Speaker_1".to_string());
+        if prev_speaker.as_deref() != Some(speaker_id.as_str()) {
+            if prev_speaker.is_some() {
+                speaker_switches += 1;
+            }
+            prev_speaker = Some(speaker_id.clone());
+        }
+        if !speaker_chunks.contains_key(&speaker_id) {
+            speaker_order.push(speaker_id.clone());
+        }
+        speaker_chunks.entry(speaker_id).or_default().push(idx);
+    }
+    let total_to_synth: usize = speaker_chunks.values().map(|v| v.len()).sum();
+    log::info!(
+        "TTS: синтез {} чанков, {} спикер(ов), {} переключений в хронологии → {} запусков движка",
+        total_to_synth,
+        speaker_order.len(),
+        speaker_switches,
+        speaker_order.len()
+    );
+
+    let mut engine_starts = 0usize;
+    let mut engine_gen_secs = 0.0f64;
+    let mut done_chunks = 0usize;
+
+    for speaker_id in &speaker_order {
+        if crate::is_cancelled() {
+            anyhow::bail!("TTS: pipeline отменён пользователем");
+        }
 
         let ref24 = match voice_map.get(speaker_id) {
             Some(v) => v.clone(),
@@ -724,123 +743,145 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
                     &src_samples[start..end],
                 )?;
                 let ref24 = tmp_dir.join(format!("deedub_tts_ref_{}_24k.wav", safe));
-                resample_wav(
+                fit_and_resample_wav(
                     &ref16.to_string_lossy(),
                     &ref24.to_string_lossy(),
+                    1.0,
                     24000,
                     &ffmpeg_path,
                 )?;
 
                 log::info!(
-                    "TTS: спикер {} → стартовый голос {} (референс {:.1}–{:.1}с)",
+                    "TTS: спикер {} → голос {} (референс {:.1}–{:.1}с, {} чанков)",
                     speaker_id,
                     ref24.display(),
                     seg.0,
-                    seg.1
+                    seg.1,
+                    speaker_chunks[speaker_id].len()
                 );
                 voice_map.insert(speaker_id.to_string(), ref24.clone());
                 ref24
             }
         };
 
-        // Перезапуск движка с референсом спикера, если он сменился.
+        // Один запуск движка на спикера: все его чанки синтезируются под ним.
         let startup_str = ref24.to_string_lossy().to_string();
-        if startup_str != current_startup_voice {
-            crate::block_on(state.tts.ensure(
-                app,
-                &engine_exe,
-                &tts_backend,
-                &models_dir.to_string_lossy().to_string(),
-                &preset_id,
-                &startup_str,
-            ))
-            .map_err(|e| anyhow::anyhow!("TTS: запуск движка: {e}"))?;
-            current_startup_voice = startup_str;
-        }
+        crate::block_on(state.tts.ensure(
+            app,
+            &engine_exe,
+            &tts_backend,
+            &models_dir.to_string_lossy().to_string(),
+            &preset_id,
+            &startup_str,
+        ))
+        .map_err(|e| anyhow::anyhow!("TTS: запуск движка: {e}"))?;
+        engine_starts += 1;
 
-        log::info!(
-            "TTS: [{}/{}] ({:.1}s–{:.1}s) [{}] {}",
-            idx + 1,
-            translated.len(),
-            chunk.start_sec,
-            chunk.end_sec,
-            speaker_id,
-            text,
-        );
-
-        // Cross-lingual clone: EN-референс (startup voice) → RU-синтез.
-        //
-        // Адаптивный retry (костыль) применяется ТОЛЬКО к base cosyvoice3-tts:
-        // его cross-lingual LM выбрасывает reference-токены и иногда
-        // недо-генерирует реплику — финальные слоги «обрезаются». RAS-семплер
-        // seed-зависим, поэтому пробуем несколько seed'ов. Условие выбора
-        // финальной генерации — ПОЛНОТА: реальный темп речи варьируется
-        // 3.9–6.9 гласных/сек, а обрезанные генерации короче полной в
-        // ~0.72–0.86× — поэтому останавливаемся, когда ДВЕ попытки сходятся
-        // на длине полной фразы.
-        //
-        // RL-модель (cosyvoice3-tts-rl, RE-постобучен на стабильность) этот
-        // костыль НЕ требует: синтезируем один раз без сидов.
-        let expected = expected_spoken_secs(text);
-        let mut best: Option<(Vec<u8>, u32, f64)> = None;
-        let attempt_count = if tts_backend == "cosyvoice3-tts" {
-            TTS_MAX_ATTEMPTS
-        } else {
-            1
-        };
-        let mut tracker = RetryTracker::new(expected);
-        for attempt in 0..attempt_count {
-            let seed = match attempt {
-                0 => None,
-                n => Some(TTS_RETRY_SEEDS[n - 1]),
-            };
-            let (wav_bytes, _timing) = crate::block_on(state.tts.speak(
-                text,
-                "",
-                "",
-                "",
-                1.0,
-                true,
-                "ru",
-                "en",
-                seed,
-            ))
-            .map_err(|e| {
-                anyhow::anyhow!("TTS: синтез [{}] '{}': {}", idx + 1, text, e)
-            })?;
-
-            let (gen_sr, gen_duration) = wav_sr_and_duration_bytes(&wav_bytes)?;
-            let v = tracker.observe(gen_duration);
-            if v.is_best {
-                best = Some((wav_bytes, gen_sr, gen_duration));
+        for &idx in &speaker_chunks[speaker_id] {
+            if crate::is_cancelled() {
+                anyhow::bail!("TTS: pipeline отменён пользователем");
             }
+            let chunk = &translated[idx];
+            let text = chunk.text.trim();
 
             log::info!(
-                "TTS: [{}] попытка {}/{} (seed={}) gen={:.2}s (ожид≈{:.2}s) ok{}",
+                "TTS: [{}/{}] ({:.1}s–{:.1}s) [{}] {}",
                 idx + 1,
-                attempt + 1,
-                attempt_count,
-                seed.map_or_else(|| "-".to_string(), |s| s.to_string()),
-                gen_duration,
-                expected,
-                if v.stop { " →стабильно" } else { "" },
+                translated.len(),
+                chunk.start_sec,
+                chunk.end_sec,
+                speaker_id,
+                text,
             );
 
-            if v.stop {
-                break;
-            }
-        }
+            // Cross-lingual clone: EN-референс (startup voice) → RU-синтез.
+            //
+            // Адаптивный retry (костыль) применяется ТОЛЬКО к base cosyvoice3-tts:
+            // его cross-lingual LM выбрасывает reference-токены и иногда
+            // недо-генерирует реплику — финальные слоги «обрезаются». RAS-семплер
+            // seed-зависим, поэтому пробуем несколько seed'ов. Условие выбора
+            // финальной генерации — ПОЛНОТА: реальный темп речи варьируется
+            // 3.9–6.9 гласных/сек, а обрезанные генерации короче полной в
+            // ~0.72–0.86× — поэтому останавливаемся, когда ДВЕ попытки сходятся
+            // на длине полной фразы.
+            //
+            // RL-модель (cosyvoice3-tts-rl, RE-постобучен на стабильность) этот
+            // костыль НЕ требует: синтезируем один раз без сидов.
+            let expected = expected_spoken_secs(text);
+            let mut best: Option<(Vec<u8>, u32, f64)> = None;
+            let attempt_count = if tts_backend == "cosyvoice3-tts" {
+                TTS_MAX_ATTEMPTS
+            } else {
+                1
+            };
+            let mut tracker = RetryTracker::new(expected);
+            for attempt in 0..attempt_count {
+                let seed = match attempt {
+                    0 => None,
+                    n => Some(TTS_RETRY_SEEDS[n - 1]),
+                };
+                let (wav_bytes, timing) = crate::block_on(state.tts.speak(
+                    text,
+                    "",
+                    "",
+                    "",
+                    1.0,
+                    true,
+                    "ru",
+                    "en",
+                    seed,
+                ))
+                .map_err(|e| {
+                    anyhow::anyhow!("TTS: синтез [{}] '{}': {}", idx + 1, text, e)
+                })?;
+                if let Some(t) = timing {
+                    engine_gen_secs += t.gen_secs;
+                }
 
-        let (wav_bytes, gen_sr, gen_duration) = best
-            .expect("TTS: ни одна попытка не дала генерации");
-        durations[idx] = gen_duration;
-        synthesized.push(SynthesizedChunk {
-            index: idx,
-            wav: wav_bytes,
-            gen_duration,
-            gen_sr,
-        });
+                let (gen_sr, gen_duration) = wav_sr_and_duration_bytes(&wav_bytes)?;
+                let v = tracker.observe(gen_duration);
+                if v.is_best {
+                    best = Some((wav_bytes, gen_sr, gen_duration));
+                }
+
+                log::info!(
+                    "TTS: [{}] попытка {}/{} (seed={}) gen={:.2}s (ожид≈{:.2}s) ok{}",
+                    idx + 1,
+                    attempt + 1,
+                    attempt_count,
+                    seed.map_or_else(|| "-".to_string(), |s| s.to_string()),
+                    gen_duration,
+                    expected,
+                    if v.stop { " →стабильно" } else { "" },
+                );
+
+                if v.stop {
+                    break;
+                }
+            }
+
+            let (wav_bytes, gen_sr, gen_duration) = best
+                .expect("TTS: ни одна попытка не дала генерации");
+            durations[idx] = gen_duration;
+            synthesized.push(SynthesizedChunk {
+                index: idx,
+                wav: wav_bytes,
+                gen_duration,
+                gen_sr,
+            });
+
+            done_chunks += 1;
+            crate::pipeline::emit_progress(
+                "tts",
+                70.0 + (done_chunks as f32 / total_to_synth.max(1) as f32) * 18.0,
+            );
+        }
     }
+    log::info!(
+        "TTS: движок запущен {} раз, сумма генерации по движку {:.1}с",
+        engine_starts,
+        engine_gen_secs
+    );
 
     // ---- PASS 2: планирование таймлайна без пересечений ----
     let plan = plan_timeline(&translated, &durations);
@@ -886,23 +927,13 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
         std::fs::write(&raw_wav, &s.wav)
             .with_context(|| format!("TTS: запись raw WAV {}", raw_wav.display()))?;
 
-        let stretched_wav = tmp_dir.join(format!("deedub_tts_stretched_{}.wav", idx));
-        if p.stretch_ratio > 1.02 {
-            time_stretch_wav(
-                &raw_wav.to_string_lossy(),
-                &stretched_wav.to_string_lossy(),
-                p.placed_duration,
-                s.gen_duration,
-                &ffmpeg_path,
-            )?;
-        } else {
-            std::fs::copy(&raw_wav, &stretched_wav).ok();
-        }
-
+        // Подгонка длительности + ресемплинг 24кГц → 44.1кГц одним проходом.
+        // tempo = gen/placed: >1 — речь ужимается в окно.
         let resampled_wav = tmp_dir.join(format!("deedub_tts_final_{}.wav", idx));
-        resample_wav(
-            &stretched_wav.to_string_lossy(),
+        fit_and_resample_wav(
+            &raw_wav.to_string_lossy(),
             &resampled_wav.to_string_lossy(),
+            p.stretch_ratio,
             out_sr as u32,
             &ffmpeg_path,
         )?;
@@ -967,7 +998,6 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
         // Чистим временные файлы чанка (диагностика: DEEDUB_KEEP_TTS_WAV=1).
         if std::env::var_os("DEEDUB_KEEP_TTS_WAV").is_none() {
             std::fs::remove_file(&raw_wav).ok();
-            std::fs::remove_file(&stretched_wav).ok();
             std::fs::remove_file(&resampled_wav).ok();
         }
     }

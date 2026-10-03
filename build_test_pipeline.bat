@@ -1,6 +1,9 @@
 @echo off
 setlocal enableextensions
-set "PROJ=%~dp0"
+REM %~dp0 ends with a backslash. Passing it as --project "%PROJ%" makes
+REM the C runtime swallow the NEXT argument (and leaves a stray quote
+REM inside the path). %%~fI normalizes it without a trailing slash.
+for %%I in ("%~dp0.") do set "PROJ=%%~fI"
 
 REM --- Find VS and init MSVC environment ---
 set "VS_INIT_OK="
@@ -30,7 +33,7 @@ set "CARGO_PROFILE_RELEASE_STRIP="
 REM --- Ensure Rust/Cargo on PATH (vcvarsall may reset it) ---
 set "PATH=%USERPROFILE%\.cargo\bin;%USERPROFILE%\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin;%PATH%"
 
-cd /d "%PROJ%src-tauri"
+cd /d "%PROJ%\src-tauri"
 
 echo Building test-pipeline...
 cargo build --bin test-pipeline --release
