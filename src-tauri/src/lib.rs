@@ -12,7 +12,7 @@ mod translation;
 pub mod tts;
 mod verification;
 
-use comm::{PipelineConfig, PipelineContext, ProgressUpdate};
+use comm::{PipelineConfig, PipelineContext, ProgressUpdate, SubtitleChunk};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
@@ -220,6 +220,7 @@ fn process_video(
         ffmpeg_path: app_cfg.ffmpeg_path.clone(),
         enable_dubbing: enable_dubbing.unwrap_or(false),
         mix_volume: app_cfg.mix_volume,
+        prompt_style: Some(app_cfg.prompt_style.clone()),
     };
 
     let handle = app_handle.clone();
@@ -299,6 +300,99 @@ fn save_config(state: tauri::State<AppState>, cfg: config::AppConfig) -> Result<
     Ok(())
 }
 
+/// Делает `path` активной моделью перевода и возвращает её в списке моделей.
+///
+/// Пишет в конфиг плагина движка (`app_config.json`, ключ `last_model`) — тот же
+/// файл, откуда модель читается при запуске (`llm::resolve_model_path`), и
+/// поэтому единственный источник правды (core §2.1). Никакой второй
+/// «выбранной модели» в нашем конфиге не появляется специально: иначе два
+/// места правды разъедутся, и UI будет показывать не ту модель, что поедет.
+///
+/// Плагин не меняем: `load_config`/`save_config` у него и так `pub`, хост уже
+/// пользуется ими кросс-кратом.
+#[tauri::command]
+fn set_translation_model(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let path = path.trim().to_string();
+    if path.is_empty() {
+        return Err("Путь к модели перевода не указан".to_string());
+    }
+    if !std::path::Path::new(&path).is_file() {
+        return Err(format!("Файл модели не найден: {path}"));
+    }
+
+    let mut cfg = tauri_plugin_llama_engine::engine::load_config(&app);
+    if !cfg.models.iter().any(|m| m == &path) {
+        // Файл на диске есть, но в реестре плагина его нет — значит модель
+        // добавлена мимо панели (или панель её уже чистила). Регистрируем здесь
+        // же: иначе выбор из UI нельзя было бы вернуть в реестр, а `remove_model`
+        // при следующем открытии панели решит, что модели не существует.
+        cfg.models.push(path.clone());
+    }
+    cfg.last_model = Some(path.clone());
+    tauri_plugin_llama_engine::engine::save_config(&app, &cfg)
+        .map_err(|e| format!("Не удалось сохранить выбор модели: {e}"))?;
+    log::info!("LLM: активная модель перевода — {path}");
+    Ok(path)
+}
+
+/// Список моделей перевода, доступных для выбора: пути из конфига плагина плюс
+/// отметка активной. Отдельной команды плагина для этого нет — там есть
+/// `get_engine_config`, но он отдаёт ещё и параметры сэмплирования, а здесь нужен
+/// только список для селекта.
+#[tauri::command]
+fn list_translation_models(app: tauri::AppHandle) -> Result<Vec<ModelChoice>, String> {
+    let cfg = tauri_plugin_llama_engine::engine::load_config(&app);
+    let mut models: Vec<ModelChoice> = cfg
+        .models
+        .iter()
+        .map(|p| ModelChoice {
+            path: p.clone(),
+            name: short_model_name(p),
+            exists: std::path::Path::new(p).is_file(),
+        })
+        .collect();
+    // Активная модель может отсутствовать в реестре (например, её добавили
+    // до обновления конфига). Без неё селект показал бы «пусто» при реально
+    // работающей модели — показываем и её.
+    let active = cfg.last_model.clone().unwrap_or_default();
+    if !active.is_empty() && !models.iter().any(|m| m.path == active) {
+        models.insert(
+            0,
+            ModelChoice {
+                path: active.clone(),
+                name: short_model_name(&active),
+                exists: std::path::Path::new(&active).is_file(),
+            },
+        );
+    }
+    Ok(models)
+}
+
+/// Строка для селекта: имя файла без пути и без расширения — длинные пути
+/// `uncen\gemma-4-12B\gemma-4-12B-…gguf` в `<option>` нечитаемы.
+fn short_model_name(path: &str) -> String {
+    let file = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches(".gguf");
+    if file.is_empty() {
+        path.to_string()
+    } else {
+        file.to_string()
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ModelChoice {
+    path: String,
+    name: String,
+    /// Файл на месте? Реестр плагина может содержать удалённые пути, и селект
+    /// обязан это показывать, иначе пользователь выберет модель и получит ошибку
+    /// только в момент перевода.
+    exists: bool,
+}
+
 // ---- Logger setup (shared between GUI and headless) ----
 
 /// Логирование — плагин `tauri-plugin-logs` (core §2.5.2): он ставит
@@ -333,6 +427,8 @@ fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
             process_video,
             get_config,
             save_config,
+            set_translation_model,
+            list_translation_models,
         ])
 }
 
@@ -361,6 +457,7 @@ fn run_pipeline_blocking(
         ffmpeg_path: cfg.ffmpeg_path.clone(),
         enable_dubbing,
         mix_volume: cfg.mix_volume,
+        prompt_style: Some(cfg.prompt_style),
     };
     let ctx = comm::PipelineContext::new(pcfg);
     log::info!("run_pipeline_blocking: запуск пайплайна...");
@@ -491,6 +588,99 @@ pub fn run_headless(video_path: String, enable_dubbing: bool) -> i32 {
     }
 }
 
+/// A/B прогон ТОЛЬКО перевода на фиксированном входе: обе модели получают
+/// один и тот же список чанков, один и тот же промпт и один и тот же код
+/// (`translation::translate_with_session`). Диаризация/STT/TTS не запускаются —
+/// иначе вход плавает между прогонами (парakeet+VAD недетерминированы, число
+/// спикеров гуляет 4↔5) и сравнение переводов становится бессмысленным.
+///
+/// Модель выбирается env `DEEDUB_LLM_MODEL` (см. `llm::resolve_model_path`),
+/// иначе берётся из конфига плагина.
+pub fn run_mt_ab(video_path: String, json_path: String) -> i32 {
+    init_logging_and_engine_config();
+
+    let app_cfg = config::load();
+    let app = base_builder(app_cfg)
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    APP_HANDLE.set(app.handle().clone()).ok();
+    let _keep_app = app; // держим Wry-приложение живым до конца прогона
+
+    let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let raw = match std::fs::read_to_string(&json_path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("MT-AB: не читается {}: {e}", json_path);
+                return 2;
+            }
+        };
+        let src: Vec<SubtitleChunk> = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("MT-AB: невалидный JSON {}: {e}", json_path);
+                return 2;
+            }
+        };
+        log::info!(
+            "MT-AB: вход {} чанков из {}",
+            src.len(),
+            json_path
+        );
+
+        // Формат промпта берём из тех же настроек, что и обычный запуск: иначе
+        // харнесс мерил бы Index-Translate в одном формате, а приложение в
+        // другом, и A/B показывал бы разницу, которой нет в проде. Env
+        // `DEEDUB_LLM_PROMPT` всё равно приоритетнее (см. `PromptStyle::resolve`).
+        let cfg = config::load();
+        let mut ctx = PipelineContext::new(PipelineConfig {
+            input_path: video_path.clone(),
+            output_format: "mp4".to_string(),
+            ffmpeg_path: cfg.ffmpeg_path.clone(),
+            enable_dubbing: false,
+            mix_volume: 1.0,
+            prompt_style: Some(cfg.prompt_style),
+        });
+        ctx.subtitle_chunks = Some(src);
+
+        // Модель показываем, но сессию НЕ открываем: `translate_with_session`
+        // открывает её сам и возвращает живой сессией. Вторая сессия = второй
+        // llama-server и 6.5 ГиБ в VRAM (пик 14.3 ГиБ -> просадка скорости).
+        match std::env::var("DEEDUB_LLM_MODEL") {
+            Ok(p) if !p.trim().is_empty() => eprintln!("MT-AB: модель (env) {p}"),
+            _ => eprintln!(
+                "MT-AB: модель из настроек плагина (DEEDUB_LLM_MODEL не задан)"
+            ),
+        }
+
+        let t0 = std::time::Instant::now();
+        let (out, _sess) = match crate::translation::translate_with_session(ctx) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("MT-AB: перевод провалился: {e:?}");
+                return 4;
+            }
+        };
+        let secs = t0.elapsed().as_secs_f64();
+        eprintln!("MT-AB: {} чанков за {:.1} с", out.translated_chunks.as_ref().map_or(0, |v| v.len()), secs);
+        log::info!("MT-AB: translate {:.1} с", secs);
+
+        let chunks = out.translated_chunks.clone().unwrap_or_default();
+        let out_json = serde_json::to_string_pretty(&chunks).unwrap_or_default();
+        if let Err(e) =
+            std::fs::write(crate::paths::temp_dir().join("mt_ab_out.json"), out_json)
+        {
+            eprintln!("MT-AB: не записал вывод: {e}");
+            return 4;
+        }
+        0
+    }))
+    .unwrap_or_else(|_| {
+        eprintln!("MT-AB: паника");
+        1
+    });
+    code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +705,7 @@ mod tests {
             ffmpeg_path: cfg.ffmpeg_path.clone(),
             enable_dubbing: false,
             mix_volume: 1.0,
+            prompt_style: Some(cfg.prompt_style.clone()),
         };
         let ctx = PipelineContext::new(pipeline_cfg);
 

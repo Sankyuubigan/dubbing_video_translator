@@ -88,15 +88,7 @@ impl LlmSession {
             ));
         }
 
-        let cfg = tauri_plugin_llama_engine::engine::load_config(app);
-        let model_path = cfg
-            .last_model
-            .filter(|p| !p.is_empty())
-            .ok_or_else(|| {
-                "Модель перевода не выбрана.\nОткройте Настройки → «Локальные модели перевода» \
-                 и добавьте модель (скачайте из каталога или выберите файл GGUF)."
-                    .to_string()
-            })?;
+        let model_path = resolve_model_path(app)?;
         if !Path::new(&model_path).is_file() {
             return Err(format!(
                 "Файл выбранной модели не найден: {}\n\
@@ -109,7 +101,13 @@ impl LlmSession {
         // сверху — параметры проекта для перевода.
         let mut params =
             tauri_plugin_llama_engine::commands::get_model_params(app.clone(), model_path.clone());
-        params.temperature = TEMPERATURE;
+        // env-override температуры для A/B прогонов (у Index-Translate официальная
+        // рекомендация — жадный поиск, temp 0; у Gemma-4-12B — 0.6).
+        let temperature = std::env::var("DEEDUB_LLM_TEMP")
+            .ok()
+            .and_then(|t| t.trim().parse::<f32>().ok())
+            .unwrap_or(TEMPERATURE);
+        params.temperature = temperature;
         params.top_k = TOP_K;
         params.top_p = TOP_P;
         params.min_p = MIN_P;
@@ -123,7 +121,7 @@ impl LlmSession {
 
         log::info!(
             "LLM: запускаем движок на модели {} (ctx={}, temp={:.2}, top_k={}, top_p={:.2}, rep_pen={:.2})",
-            model_path, CONTEXT_SIZE, TEMPERATURE, TOP_K, TOP_P, REPETITION_PENALTY
+            model_path, CONTEXT_SIZE, temperature, TOP_K, TOP_P, REPETITION_PENALTY
         );
 
         let engine = LlamaEngine::new(
@@ -239,4 +237,40 @@ pub fn message(role: &str, content: String) -> LlmMessage {
         tool_calls: None,
         tool_call_id: None,
     }
+}
+
+/// Путь к GGUF модели перевода. Приоритет:
+/// 1. env `DEEDUB_LLM_MODEL` (явный путь — для headless A/B прогонов разных
+///    моделей без правки пользовательских настроек);
+/// 2. конфиг плагина, `last_model` — то, что выбрано в Настройках →
+///    «Локальные модели перевода» (core §2.1: единственный источник правды
+///    в обычном режиме).
+///
+/// Тот же приём, что `resolve_stt_model` для STT и `DEEDUB_TTS_PRESET` для TTS.
+///
+/// `pub(crate)`, потому что от пути зависит не только запуск движка, но и
+/// выбор формата промпта (`translation::PromptStyle`): у Index-Translate
+/// своя каноническая форма, и её надо знать по реально выбранной модели,
+/// а не только по env-переменной (в UI модель берётся из конфига плагина).
+pub(crate) fn resolve_model_path(app: &AppHandle) -> Result<String, String> {
+    if let Ok(p) = std::env::var("DEEDUB_LLM_MODEL") {
+        if !p.is_empty() {
+            if Path::new(&p).is_file() {
+                log::info!("LLM: модель из DEEDUB_LLM_MODEL: {p}");
+                return Ok(p);
+            }
+            return Err(format!(
+                "Модель перевода из DEEDUB_LLM_MODEL не найдена: {p}"
+            ));
+        }
+    }
+
+    let cfg = tauri_plugin_llama_engine::engine::load_config(app);
+    cfg.last_model
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            "Модель перевода не выбрана.\nОткройте Настройки → «Локальные модели перевода» \
+             и добавьте модель (скачайте из каталога или выберите файл GGUF)."
+                .to_string()
+        })
 }

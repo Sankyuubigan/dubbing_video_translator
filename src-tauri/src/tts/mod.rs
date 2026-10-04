@@ -1,4 +1,4 @@
-use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk};
+use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk, MIN_CLONE_REF_SEC};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
@@ -12,7 +12,12 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Выбирает сегмент спикера для клонирования голоса.
 /// Приоритет: длительность в диапазоне [3, 10] с ближайшей к 7 с;
-/// иначе — самый длинный сегмент (но не короче 1 с).
+/// иначе — самый длинный сегмент, но не короче `MIN_CLONE_REF_SEC`.
+///
+/// Порог берётся из `comm`, а не литерал: `diarization` отбрасывает по нему же
+/// спикеров без пригодного референса, поэтому сегмент короче порога сюда
+/// попасть уже не может. Локальная копия порога означала бы, что два
+/// независимых решения о «годности» голоса разъедутся при правке одного.
 fn pick_ref_segment(speaker: &str, segments: &[SpeakerSegment]) -> Option<(f64, f64)> {
     let mine: Vec<&SpeakerSegment> = segments
         .iter()
@@ -44,7 +49,7 @@ fn pick_ref_segment(speaker: &str, segments: &[SpeakerSegment]) -> Option<(f64, 
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         })?;
     let d = longest.end_sec - longest.start_sec;
-    if d >= 1.0 {
+    if d >= MIN_CLONE_REF_SEC {
         Some((longest.start_sec, longest.end_sec))
     } else {
         None
@@ -728,8 +733,16 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
             Some(v) => v.clone(),
             None => {
                 // Создаём клон-референс по голосу спикера (16кГц → 24кГц для --voice).
-                let seg = pick_ref_segment(speaker_id, speaker_segments)
-                    .ok_or_else(|| anyhow::anyhow!("TTS: нет референсного сегмента для {}", speaker_id))?;
+                let seg = pick_ref_segment(speaker_id, speaker_segments).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "TTS: нет референсного сегмента для {speaker_id} — у него нет \
+                         реплики длиннее {}с, а короче клон голоса неустойчив. Диаризация \
+                         обычно присоединяет таких спикеров к соседям (см. \
+                         diarization::merge_unclonable_speakers); если спикер единственный, \
+                         значит вся речь в файле короче этого порога.",
+                        MIN_CLONE_REF_SEC
+                    )
+                })?;
                 let start = (seg.0 * src_sr as f64) as usize;
                 let end = ((seg.1 * src_sr as f64) as usize).min(src_samples.len());
                 if start >= end {

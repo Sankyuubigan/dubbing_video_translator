@@ -1,10 +1,9 @@
-use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk};
+﻿use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
-
 fn load_wav_spec(path: &str) -> Result<(Vec<f32>, u32)> {
     let reader = hound::WavReader::open(path).context("Ошибка открытия WAV")?;
     let spec = reader.spec();
@@ -15,7 +14,6 @@ fn load_wav_spec(path: &str) -> Result<(Vec<f32>, u32)> {
         .collect();
     Ok((samples, spec.sample_rate))
 }
-
 /// Определение основного тона (F0) через автокорреляцию.
 /// Возвращает медианную частоту в Гц или None, если речь не обнаружена.
 fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
@@ -25,22 +23,17 @@ fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
     let max_lag = (sample_rate as f64 / min_freq) as usize;
     let frame_size = 1024;
     let hop_size = 512;
-
     let mut pitches: Vec<f64> = Vec::new();
     let mut pos = 0;
-
     while pos + frame_size <= samples.len() {
         let frame = &samples[pos..pos + frame_size];
-
         let energy: f32 = frame.iter().map(|&x| x * x).sum();
         if energy < 1e-6 {
             pos += hop_size;
             continue;
         }
-
         let mut best_lag = 0;
         let mut best_corr = 0.0f32;
-
         for lag in min_lag..=max_lag.min(frame_size / 2) {
             let mut corr = 0.0f32;
             for i in 0..(frame_size - lag) {
@@ -56,21 +49,17 @@ fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
                 best_lag = lag;
             }
         }
-
         if best_corr > 0.3 && best_lag > 0 {
             pitches.push(sample_rate as f64 / best_lag as f64);
         }
-
         pos += hop_size;
     }
-
     if pitches.is_empty() {
         return None;
     }
     pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
     Some(pitches[pitches.len() / 2])
 }
-
 /// Определяет пол для каждого уникального спикера на основе высоты тона.
 /// Порог: < 160 Гц → male, >= 160 Гц → female.
 /// Сколько сегментов на спикера берём для оценки тона (самые длинные).
@@ -79,7 +68,6 @@ fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
 /// автокорреляция гонялась по ВСЕМ сегментам ролика — десятки секунд CPU в
 /// один поток, уже после того как движок освободил видеопамять.
 const PITCH_SEGMENTS_PER_SPEAKER: usize = 3;
-
 /// Определяет пол для каждого уникального спикера на основе высоты тона.
 /// Порог: < 160 Гц → male, >= 160 Гц → female.
 fn detect_speaker_genders(
@@ -93,7 +81,6 @@ fn detect_speaker_genders(
             return HashMap::new();
         }
     };
-
     // Спикер → окна [start, end) в сэмплах, отсортированные по убыванию длины.
     let mut by_speaker: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for seg in speaker_segments {
@@ -107,7 +94,6 @@ fn detect_speaker_genders(
             .or_default()
             .push((start, end));
     }
-
     let mut result = HashMap::new();
     for (speaker_id, mut windows) in by_speaker {
         windows.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)));
@@ -139,9 +125,7 @@ fn detect_speaker_genders(
     }
     result
 }
-
 /// ---- Путь диаризации: движок CrispASR (parakeet ASR + диаризация) ----
-
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct EngineSeg {
@@ -150,25 +134,21 @@ struct EngineSeg {
     speaker: String,
     text: String,
 }
-
 #[derive(Deserialize)]
 struct Offsets {
     from: i64,
     to: i64,
 }
-
 #[derive(Deserialize)]
 struct Timestamps {
     from: String,
     to: String,
 }
-
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct EngineTranscription {
     transcription: Vec<EngineSeg>,
 }
-
 /// Парсит "00:00:02,880" (допускаются '.' и "mm:ss") в миллисекунды.
 fn ts_to_ms(s: &str) -> Option<i64> {
     let parts: Vec<&str> = s.split(':').collect();
@@ -185,7 +165,6 @@ fn ts_to_ms(s: &str) -> Option<i64> {
         .unwrap_or(0);
     Some(h * 3_600_000 + m * 60_000 + sec * 1000 + ms)
 }
-
 /// Извлекает номер из "(speaker 0)".
 fn parse_speaker_num(s: &str) -> Option<usize> {
     let num: String = s
@@ -195,7 +174,6 @@ fn parse_speaker_num(s: &str) -> Option<usize> {
         .collect();
     num.parse().ok()
 }
-
 fn log_tail(path: &Path, prefix: &str) {
     if let Ok(content) = std::fs::read_to_string(path) {
         let lines: Vec<&str> = content.lines().collect();
@@ -206,7 +184,6 @@ fn log_tail(path: &Path, prefix: &str) {
         }
     }
 }
-
 /// Разбирает diarized_json движка в (speaker_segments, subtitle_chunks).
 fn parse_engine_diarization(
     json_path: &Path,
@@ -216,7 +193,6 @@ fn parse_engine_diarization(
     if parsed.transcription.is_empty() {
         return None;
     }
-
     // Стабильные Speaker_N в порядке первого появления спикера.
     let mut order: HashMap<usize, usize> = HashMap::new();
     let mut seq = 1usize;
@@ -227,7 +203,6 @@ fn parse_engine_diarization(
             seq += 1;
         }
     }
-
     let mut speaker_segments: Vec<SpeakerSegment> = Vec::new();
     let mut subtitle_chunks: Vec<SubtitleChunk> = Vec::new();
     for seg in &parsed.transcription {
@@ -267,14 +242,15 @@ fn parse_engine_diarization(
             word_timestamps: None,
         });
     }
-
-    if speaker_segments.is_empty() {
-        return None;
-    }
+if speaker_segments.is_empty() {
+    return None;
+}
     speaker_segments.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap());
+    // Спикер без сегмента длиннее MIN_CLONE_REF_SEC не является голосом —
+    // присоединяем его к соседу, иначе TTS упадёт на клонировании.
+    crate::comm::merge_unclonable_speakers(&mut speaker_segments, &mut subtitle_chunks);
     Some((speaker_segments, subtitle_chunks))
 }
-
 /// Один прогон CrispASR: parakeet ASR + VAD + диаризация с авто-оценкой
 /// числа спикеров (`--diarize-speakers`, сессионная кластеризация TitaNet).
 /// Возвращает None, если движок недоступен/не дал сегментов.
@@ -283,7 +259,6 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
         log::info!("Diarization: отменено пользователем");
         return None;
     }
-
     let engine_exe = match crate::pick_engine_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -298,15 +273,12 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
             return None;
         }
     };
-
     let prefix = crate::paths::temp_file(&format!("deedub_diar_{}", std::process::id()));
     let json_path = prefix.with_extension("json");
     let stderr_log = prefix.with_extension("log");
-
     log::info!(
         "Diarization: [CrispASR] запускаем parakeet + диаризацию (--diarize-speakers, авто-число спикеров)..."
     );
-
     let stderr_file = match std::fs::File::create(&stderr_log) {
         Ok(f) => f,
         Err(e) => {
@@ -314,7 +286,6 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
             return None;
         }
     };
-
     let start = std::time::Instant::now();
     let mut cmd = Command::new(&engine_exe);
     cmd.arg("--backend")
@@ -338,7 +309,6 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-
     let status = match cmd.status() {
         Ok(s) => s,
         Err(e) => {
@@ -351,12 +321,10 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
         start.elapsed().as_secs_f64(),
         status.code()
     );
-
     if !status.success() {
         log_tail(&stderr_log, "Diarization: движок завершился с ошибкой, stderr:");
         return None;
     }
-
     let parsed = parse_engine_diarization(&json_path);
     let _ = std::fs::remove_file(&json_path);
     // stderr движка НЕ удаляем: это единственный источник попутной разбивки
@@ -371,20 +339,17 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
     }
     parsed
 }
-
 pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
     let wav_path = match ctx.wav_path.as_deref() {
         Some(p) => p.to_string(),
         None => anyhow::bail!("Нет WAV файла"),
     };
-
     let (mut speaker_segments, subtitle_chunks) = try_engine_diarization(&wav_path).ok_or_else(|| {
         anyhow::anyhow!(
             "CrispASR не дал сегментов диаризации. Проверьте, что движок установлен \
              (TTS-настройки) и STT-модель доступна."
         )
     })?;
-
     let genders = detect_speaker_genders(&wav_path, &speaker_segments);
     for seg in &mut speaker_segments {
         seg.gender = genders.get(&seg.speaker_id).cloned();
@@ -398,7 +363,6 @@ pub fn diarize(ctx: PipelineContext) -> Result<PipelineContext> {
         unique.len(),
         speaker_segments.len()
     );
-
     Ok(PipelineContext {
         speaker_segments: Some(speaker_segments),
         subtitle_chunks: Some(subtitle_chunks),

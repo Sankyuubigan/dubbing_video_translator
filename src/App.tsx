@@ -14,6 +14,15 @@ import Settings from "./Settings";
 type Stage = "idle" | "select" | "processing" | "done" | "error";
 type Tab = "main" | "logs" | "settings";
 
+/** Формат промпта перевода. `auto` определяет его по модели (см. PromptStyle в Rust). */
+type PromptStyle = "auto" | "insttrans" | "chat";
+
+interface ModelChoice {
+  path: string;
+  name: string;
+  exists: boolean;
+}
+
 interface ProgressUpdate {
   stage: string;
   percent: number;
@@ -29,6 +38,8 @@ export default function App() {
   const [format, setFormat] = useState<string>("mp4");
   const [enableDubbing, setEnableDubbing] = useState<boolean>(false);
   const [mixVolume, setMixVolume] = useState<number>(15);
+  const [promptStyle, setPromptStyle] = useState<PromptStyle>("auto");
+  const [models, setModels] = useState<ModelChoice[]>([]);
   const [stage, setStage] = useState<Stage>("idle");
   const [progress, setProgress] = useState(0);
   const [progressStage, setProgressStage] = useState("");
@@ -36,11 +47,14 @@ export default function App() {
   const [error, setError] = useState("");
 
   const modelPath = engineCfg?.last_model || "";
-  const modelName = modelPath ? modelPath.split("\\").pop()?.split("/").pop() || modelPath : "";
 
   const refreshEngineConfig = useCallback(async () => {
     try {
       setEngineCfg(await getEngineConfig());
+      // Список для селекта берём своей командой: она отдаёт только пути и
+      // признак «файл на месте», а `getEngineConfig` тащит за собой ещё и
+      // параметры сэмплирования, которые селекту не нужны.
+      setModels(await invoke<ModelChoice[]>("list_translation_models"));
     } catch (e) {
       console.error("Не удалось прочитать конфиг движка LLM", e);
     }
@@ -93,29 +107,52 @@ export default function App() {
       output_format: string;
       enable_dubbing: boolean;
       mix_volume: number;
+      prompt_style: PromptStyle;
     }>("get_config")
       .then((cfg) => {
         if (cfg.ffmpeg_path) setFfmpegPath(cfg.ffmpeg_path);
         if (cfg.output_format) setFormat(cfg.output_format);
         setEnableDubbing(cfg.enable_dubbing);
         setMixVolume(Math.round(cfg.mix_volume * 100));
+        // Значение из старой копии config.toml может быть любым мусором —
+        // тогда оставляем auto, а не пишем мусор обратно в конфиг.
+        if (["auto", "insttrans", "chat"].includes(cfg.prompt_style)) {
+          setPromptStyle(cfg.prompt_style);
+        }
       })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
+      // ВНИМАНИЕ: `save_config` принимает весь структур целиком, поэтому здесь
+      // обязаны быть ВСЕ поля `AppConfig`. Забытое поле не «останется как
+      // было» — оно пропадёт из config.toml, а при следующей загрузке
+      // `config::load` вернёт дефолты для всего файла.
       invoke("save_config", {
         cfg: {
           ffmpeg_path: ffmpegPath || null,
           output_format: format,
           enable_dubbing: enableDubbing,
           mix_volume: mixVolume / 100,
+          prompt_style: promptStyle,
         },
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ffmpegPath, format, enableDubbing, mixVolume]);
+  }, [ffmpegPath, format, enableDubbing, mixVolume, promptStyle]);
+
+  const handleSelectModel = async (path: string) => {
+    if (!path) return;
+    try {
+      await invoke("set_translation_model", { path });
+      // Событие нужно, чтобы обновились и наш индикатор, и `●` у активной
+      // модели в панели плагина — это публичный контракт плагина, а не костыль.
+      document.dispatchEvent(new CustomEvent(MODELS_CHANGED_EVENT));
+    } catch (e) {
+      setError(`Не удалось выбрать модель: ${e}`);
+    }
+  };
 
   const handleSelectVideo = async () => {
     const file = await open({
@@ -211,24 +248,52 @@ export default function App() {
           <div className="card">
             <label>Модель перевода</label>
             <div className="file-row">
-              {modelName ? (
-                <span className="file-name">{modelName}</span>
-              ) : (
-                <span className="file-name dim">Не выбрана</span>
-              )}
+              <select
+                className="select"
+                value={modelPath}
+                onChange={(e) => void handleSelectModel(e.target.value)}
+              >
+                <option value="">— не выбрана —</option>
+                {models.map((m) => (
+                  <option key={m.path} value={m.path}>
+                    {m.name}
+                    {m.exists ? "" : " — файл не найден"}
+                  </option>
+                ))}
+              </select>
               <button
                 className="btn-secondary"
                 onClick={() => setActiveTab("settings")}
               >
-                {modelName ? "Изменить" : "Выбрать в Настройках"}
+                Добавить модель
               </button>
             </div>
-            {!modelName && (
+            {models.length === 0 && (
               <p className="hint">
                 Настройки → «Локальные модели перевода»: скачайте модель из
                 каталога или добавьте свой GGUF-файл.
               </p>
             )}
+          </div>
+
+          <div className="card">
+            <label>Формат промпта перевода</label>
+            <select
+              className="select"
+              value={promptStyle}
+              onChange={(e) => setPromptStyle(e.target.value as PromptStyle)}
+            >
+              <option value="auto">Авто — по модели (рекомендуется)</option>
+              <option value="insttrans">instTrans — для Index-Translate</option>
+              <option value="chat">Chat — для Gemma и прочих чат-моделей</option>
+            </select>
+            <p className="hint">
+              {promptStyle === "auto"
+                ? "Index-Translate получает свой родной формат instTrans, остальные модели — наш chat-промпт с контекстом."
+                : promptStyle === "insttrans"
+                  ? "Формат instTrans. С чужими моделями (Gemma) перевод станет хуже."
+                  : "Наш chat-промпт. С Index-Translate он ломается: модель дублирует соседние реплики."}
+            </p>
           </div>
 
           <div className="card checkbox-card">

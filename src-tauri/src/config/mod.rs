@@ -13,9 +13,23 @@ pub struct AppConfig {
     pub enable_dubbing: bool,
     #[serde(default = "default_mix_volume")]
     pub mix_volume: f64,
+    /// Формат промпта перевода: `auto` | `insttrans` | `chat`.
+    ///
+    /// Не в конфиге плагина, потому что это поведение нашего приложения, а не
+    /// плагина: движку всё равно, в каком виде мы формулируем просьбу модели.
+    /// `#[serde(default)]` обязателен — без него старая копия файла без этого
+    /// ключа привела бы к откату всего конфига на дефолты (см. `load`).
+    #[serde(default = "default_prompt_style")]
+    pub prompt_style: String,
 }
 
 fn default_mix_volume() -> f64 { 0.15 }
+
+/// `auto` — определять формат по модели. Единственный безопасный дефолт:
+/// у Index-Translate канонический формат instTrans, у Gemma и прочих чат-
+/// моделей наш собственный chat-промпт, и путать их нельзя (см.
+/// `translation::PromptStyle`).
+fn default_prompt_style() -> String { "auto".to_string() }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -24,6 +38,7 @@ impl Default for AppConfig {
             ffmpeg_path: None,
             enable_dubbing: false,
             mix_volume: 0.15,
+            prompt_style: default_prompt_style(),
         }
     }
 }
@@ -49,7 +64,22 @@ pub fn load() -> AppConfig {
         return cfg;
     }
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    toml::from_str(&content).unwrap_or_default()
+    match toml::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // Молча отдать дефолт здесь означало бы «все настройки слетели»
+            // без единого слова в логе: пользователь видит пустой ffmpeg-путь и
+            // думает, что приложение забыло его настройки. Ошибка парсинга —
+            // почти всегда правка файла руками, и путь к нему нужен в тексте
+            // ошибки.
+            log::error!(
+                "Config: не удалось разобрать {}: {e}. Возвращаю значения по умолчанию — \
+                 проверьте файл, иначе настройки будут перезаписаны при следующем сохранении.",
+                path.display()
+            );
+            AppConfig::default()
+        }
+    }
 }
 
 pub fn save(cfg: &AppConfig) -> Result<()> {

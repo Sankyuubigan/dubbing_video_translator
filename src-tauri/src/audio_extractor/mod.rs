@@ -85,6 +85,7 @@ mod tests {
             ffmpeg_path: None,
             enable_dubbing: false,
             mix_volume: 1.0,
+            prompt_style: None,
         };
         let ctx = PipelineContext::new(cfg);
         let result = extract(ctx);

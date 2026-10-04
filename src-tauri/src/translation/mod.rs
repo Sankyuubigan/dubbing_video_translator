@@ -17,7 +17,7 @@ STRICT RULES:
 3. NUMBERS TO WORDS: You MUST spell out ALL numbers and symbols using Russian words (e.g. 'сто семьдесят сантиметров' instead of '170 см', 'тридцать два' instead of '32'). TTS engine cannot read digits.
 4. METRIC: Convert imperial units to metric before spelling them out.
 5. GENDER: Current speaker is [SPEAKER_GENDER]. Ensure Russian verbs/adjectives match this gender perfectly.
-6. NO CENSORSHIP: Preserve all slang and profanity accurately.
+6. NO CENSORSHIP: Preserve all slang and profanity accurately, and write every word in full, in plain letters. Never mask a word with *, x, dots or any other symbol, because the speech engine cannot pronounce symbols.
 7. OUTPUT FORMAT: Output ONLY the final spoken Russian text. Do NOT think out loud, do NOT analyze, do NOT offer options or variants. Do NOT repeat or revise the answer. Do NOT add prefixes like \"Translation:\" or quotation marks.";
 
 /// Собирает сообщения для одного чанка: правила + предыдущие пары EN/RU +
@@ -49,6 +49,163 @@ fn build_messages(
     ));
 
     vec![message("system", system), message("user", user)]
+}
+
+/// Формат промпта переводчика.
+///
+/// Не косметика: у моделей разная «родная» форма, и промпт, придуманный под
+/// одну, для другой выходит из распределения и даёт отказ вместо перевода.
+/// Отсюда и `Chat`, и `InstTrans` как разные ветки, а не две настройки вкуса.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PromptStyle {
+    /// `system` + `user` с блоками «Previous context» / «Future context».
+    /// Проверен на Gemma-4-12B (baseline).
+    #[default]
+    Chat,
+    /// Канонический instTrans из bilibili/Index-Translate: исходник в
+    /// огороженном блоке, требования нумерованным списком с метками
+    /// «жёсткое»/«мягкое». Без контекста предыдущих пар и lookahead.
+    InstTrans,
+}
+
+impl PromptStyle {
+    /// Разбирает значение из настроек или env. Неизвестное значение не должно
+    /// молча менять поведение — но и не должно ронять перевод, поэтому
+    /// неизвестное трактуется как «не задано».
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "insttrans" | "inst-trans" => Some(PromptStyle::InstTrans),
+            "chat" => Some(PromptStyle::Chat),
+            "auto" | "" => None,
+            _ => None,
+        }
+    }
+
+    /// Определяет формат промпта. Приоритет источников:
+    /// 1. env `DEEDUB_LLM_PROMPT` — headless A/B-скрипты (`run_mt_ab.bat`,
+    ///    `run_pipeline_mt.bat`) обязаны перебивать и настройку, и эвристику,
+    ///    иначе сравнение моделей станет невоспроизводимым;
+    /// 2. явный выбор пользователя в настройках (`PipelineConfig::prompt_style`);
+    /// 3. `auto` — определение по имени файла модели.
+    ///
+    /// Эвристика по имени файла нужна для режима `auto`: пользователь может
+    /// зарегистрировать Index-Translate и забыть переключить формат. Она
+    /// всегда пишет в лог своё решение, а любая явная настройка её перебивает.
+    pub fn resolve(configured: Option<&str>, model_path: &str) -> Self {
+        if let Ok(env_value) = std::env::var("DEEDUB_LLM_PROMPT") {
+            match PromptStyle::parse(&env_value) {
+                Some(s) => return s,
+                None if env_value.trim().is_empty() => {}
+                None => {
+                    log::warn!(
+                        "Перевод: DEEDUB_LLM_PROMPT={env_value:?} не распознан, значение \
+                         игнорируется. Допустимо: chat, insttrans, auto"
+                    );
+                }
+            }
+        }
+
+        if let Some(configured) = configured {
+            if let Some(style) = PromptStyle::parse(configured) {
+                log::info!("Перевод: формат промпта из настроек — {style:?}");
+                return style;
+            }
+            if !configured.trim().is_empty()
+                && !configured.trim().eq_ignore_ascii_case("auto")
+            {
+                log::warn!(
+                    "Перевод: prompt_style={configured:?} не распознан, определяю по модели. \
+                     Допустимо: auto, chat, insttrans"
+                );
+            }
+        }
+
+        let lower = model_path.to_ascii_lowercase();
+        if lower.contains("index-translate") || lower.contains("index_translate") {
+            log::info!(
+                "Перевод: модель {model_path} — семейство Index-Translate, формат промпта \
+                 auto → instTrans (его канонический формат)"
+            );
+            PromptStyle::InstTrans
+        } else {
+            log::info!("Перевод: модель {model_path} — формат промпта auto → chat");
+            PromptStyle::default()
+        }
+    }
+}
+
+/// Собирает промпт в родном формате instTrans.
+///
+/// Формат взят из `inference/llm/translate.py` (bilibili/Index-Translate),
+/// docstring `trans_prompt`: источник огорожен блоком, требования пронумерованы
+/// и помечены как жёсткие или мягкие, в конце — запрет на любые пояснения.
+///
+/// Ключевое отличие от `build_messages`: **здесь нет блоков предыдущих пар
+/// EN/RU и lookahead**. На нашем тесте (36 чанков) именно они ломали Index-9B:
+///   - «Previous context» c 8 парами `EN:`/`RU:` модель читала как образец и
+///     продолжала его — чанки 19 и 20 на выходе были идентичны;
+///   - «Future context» с тремя будущими `EN:` строками перебивала указание
+///     «переведи текущий» — на чанке 16 модель перевела текст чанка 18.
+///
+/// Оба эффекта воспроизводились при temperature 0 и 0.6, то есть это формат
+/// входа, а не сэмплирование. Побочный выигрыш: промпт короче, и перевод
+/// 9B ускорился с 25.3 с до 19.4 с.
+///
+/// `pub(crate)`, потому что ретрай верификации обязан собираться в том же
+/// формате — иначе починит цифры и сломает всё остальное.
+pub(crate) fn build_messages_insttrans(
+    current_text: &str,
+    speaker_gender: &str,
+    defects: &[String],
+) -> Vec<LlmMessage> {
+    // Метки жёсткости — часть контракта instTrans: «жёсткое» требование модель
+    // обязана выполнить буквально, «мягкое» — по возможности.
+    let mut user = String::new();
+    user.push_str(
+        "Translate the following English subtitles into Russian, and strictly follow all \
+         constraints.\n\n",
+    );
+    user.push_str("Source text:\n");
+    user.push_str(current_text.trim());
+    user.push_str("\n\nConstraints:\n");
+    user.push_str(&format!(
+        "1. [hard] Output only the Russian translation, with no explanation and no repetitions.\n"
+    ));
+    user.push_str(&format!(
+        "2. [soft] The speaker is {speaker_gender}. Match grammatical gender exactly, and \
+         address the listener as \"ты\" when the original is informal.\n"
+    ));
+    user.push_str(
+        "3. [hard] Write all numbers as Russian words. Never use digits — the speech engine \
+         cannot pronounce them.\n",
+    );
+    user.push_str(
+        "4. [hard] Convert imperial units to metric, then spell them out in words.\n",
+    );
+    user.push_str(
+        "5. [hard] Keep the translation as short as the source. Drop fillers (oh, well, yeah) \
+         and choose concise synonyms, so it fits the same on-screen duration.\n",
+    );
+    user.push_str(
+        "6. [hard] Keep slang and profanity, but write every word in full, in plain letters. \
+         Never mask or censor a word with *, x, dots or any other symbol — write the whole \
+         word. The speech engine cannot pronounce symbols and breaks on them.\n",
+    );
+    user.push_str(
+        "7. [soft] Fix obvious speech-recognition errors (e.g. \"Season10\" means \"season ten\") \
+         using the sentence itself. Do not invent facts.\n",
+    );
+    // Дефекты из верификации идут последними и с префиксом [fix]: повторная
+    // генерация вслепую не работает — модель детерминированно воспроизводит ту
+    // же ошибку, поэтому RETRAY-ов в прогоне не было ни одного.
+    let mut num = 8;
+    for d in defects {
+        user.push_str(&format!("{num}. [hard, fix] {d}\n"));
+        num += 1;
+    }
+    user.push_str("\nOutput only the translation, with no extra explanation.");
+
+    vec![message("user", user)]
 }
 
 /// Merges adjacent chunks that belong to the same speaker and form an incomplete sentence.
@@ -248,9 +405,7 @@ pub(crate) fn clean_output(output: &str) -> String {
         }
     };
     // Strip bold/italic markers (**) from markdown formatting that model sometimes adds
-    let output = output.trim_start_matches(|c: char| c == '*' || c == '_');
-    let output = output.trim_end_matches(|c: char| c == '*' || c == '_');
-    output.trim().to_string()
+    crate::comm::sanitize_for_output(output.trim())
 }
 
 /// Returns true if the text consists only of interjections/filler words (≤4 words).
@@ -349,6 +504,14 @@ pub fn translate_with_session(
 
     let mut result: Vec<SubtitleChunk> = Vec::new();
     let mut prev_chunks: Vec<(String, String)> = Vec::new();
+    let prompt_style = PromptStyle::resolve(ctx.config.prompt_style.as_deref(), session.model_path());
+    log::info!(
+        "Перевод: формат промпта {}",
+        match prompt_style {
+            PromptStyle::Chat => "chat (system + контекст пар EN/RU + lookahead)",
+            PromptStyle::InstTrans => "insttrans (источник в блоке, нумерованные требования)",
+        }
+    );
 
     for (i, chunk) in chunks.iter().enumerate() {
         if crate::is_cancelled() {
@@ -388,7 +551,10 @@ pub fn translate_with_session(
             .unwrap_or("Person");
 
         // 3. Build messages with full context
-        let messages = build_messages(&chunk.text, &prev_chunks, &next_chunks, speaker_gender);
+        let messages = match prompt_style {
+            PromptStyle::Chat => build_messages(&chunk.text, &prev_chunks, &next_chunks, speaker_gender),
+            PromptStyle::InstTrans => build_messages_insttrans(&chunk.text, speaker_gender, &[]),
+        };
 
         let generation = match session.generate(&messages, None) {
             Ok(g) => g,
@@ -461,6 +627,96 @@ pub fn translate_with_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Цензура: замаскированные слова не доходят ни в SRT, ни в TTS ----
+
+    /// Реальный вывод Index-Translate-9B из A/B-прогона, чанк 5.
+    /// Источник: `temp/mt_ab_out_Index-Translate-9B.IQ4_XS_insttrans.json`.
+    const REAL_MASKED: &str = "Не могут позволить себе ПК. Бл*ть, обманщики всё равно остаются обманщиками. Играть против снайперских персонажей — это не фига не весело.";
+
+    #[test]
+    fn clean_output_removes_masked_word() {
+        let out = clean_output(REAL_MASKED);
+        assert!(
+            !out.contains('*'),
+            "после clean_output звёздочек быть не должно, а есть: {out}"
+        );
+        assert!(!out.contains("Бл*ть"));
+        assert!(out.contains("обманщики"), "остальной текст должен сохраниться");
+    }
+
+    #[test]
+    fn clean_output_keeps_plain_profanity() {
+        // Мат без цензуры — валидный результат, резать его нельзя.
+        let out = clean_output("Чёрт, это не весело");
+        assert_eq!(out, "Чёрт, это не весело");
+    }
+
+    #[test]
+    fn clean_output_keeps_text_without_masking() {
+        let src = "У вас два страйка, и это уже не смешно";
+        assert_eq!(clean_output(src), src);
+    }
+
+    #[test]
+    fn clean_output_keeps_markdown_bold() {
+        // `**жирный**` — это markdown, а не цензура. Резать его нельзя, иначе
+        // слово склеится с соседним.
+        let out = clean_output("**Привет** мир");
+        assert_eq!(out, "Привет мир");
+    }
+
+    #[test]
+    fn clean_output_removes_all_masked_words() {
+        let out = clean_output("Бл*ть, п*здец и ещё");
+        assert!(!out.contains('*'));
+        assert_eq!(out, "и ещё");
+    }
+
+    #[test]
+    fn strip_masked_words_counts_dropped() {
+        let (text, dropped) = strip_masked_words("a бл*ть b п*здец c");
+        assert_eq!(dropped, 2, "оба замаскированных слова должны быть выброшены");
+        assert_eq!(text, "a b c");
+    }
+
+    #[test]
+    fn strip_masked_words_ignores_clean_text() {
+        let (text, dropped) = strip_masked_words("обычный текст без цензуры");
+        assert_eq!(dropped, 0);
+        assert_eq!(text, "обычный текст без цензуры");
+    }
+
+    #[test]
+    fn strip_masked_words_keeps_standalone_star() {
+        // Одиночная звёздочка как самостоятельный токен — не замаскированное
+        // слово, выбрасывать нечего.
+        let (text, dropped) = strip_masked_words("звёздочка * отдельно");
+        assert_eq!(dropped, 0);
+        assert_eq!(text, "звёздочка * отдельно");
+    }
+
+    #[test]
+    fn prompt_forbids_masking_in_insttrans() {
+        let flat = flatten(&build_messages_insttrans("Hello", "Male", &[]));
+        assert!(
+            flat.contains("Never mask a word"),
+            "instTrans должен прямо запрещать маскирование слов"
+        );
+        assert!(
+            flat.contains("cannot pronounce symbols"),
+            "нужно объяснить модели, зачем это запрещено"
+        );
+    }
+
+    #[test]
+    fn prompt_forbids_masking_in_chat() {
+        let flat = flatten(&build_messages("Hello world", &[], &[], "Person"));
+        assert!(
+            flat.contains("Never mask a word"),
+            "chat-промпт тоже должен запрещать маскирование"
+        );
+    }
 
     /// Текст промпта собирается из system+user: движок сам рендерит его по
     /// `tokenizer.chat_template` модели, поэтому тест проверяет роли и

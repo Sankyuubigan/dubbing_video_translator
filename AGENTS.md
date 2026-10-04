@@ -47,26 +47,59 @@ Pipeline order (DON'T CHANGE):
 ## Translation Module (`src-tauri/src/translation/mod.rs`)
 
 ### Model
-Выбирается пользователем в **Настройках → «Локальные модели перевода»**
-(`<llama-models-panel>` плагина). Выбор хранится в конфиге плагина
+Выбирается пользователем в **выпадающем списке на главной вкладке**
+(«Модель перевода») либо в **Настройках → «Локальные модели перевода»**
+(`<llama-models-panel>` плагина). Оба пути пишут в конфиг плагина
 (`%APPDATA%\com.deedub.desktop\app_config.json`, ключ `last_model`) — это
-единственный источник правды (core §2.1). Движок ставится и обновляется
-плашкой «Движок перевода (LLM)» (`<llama-engine-panel>`), папку можно сменить
-там же («Изменить путь»).
-- **Типичная модель:** `D:\nn\models\llm\uncen\gemma-4-12B\gemma-4-12B-it-qat-q4_0-unquantized-heretic-ja-v2.i1-IQ4_NL.gguf`
-- **Base:** `google/gemma-4` (Gemma4ForCausalLM)
-- **Arch:** Gemma 4, 12B dense params (not MoE)
-- **Quant:** IQ4_NL, ~6.5 GiB
-- **Vocab:** 256000, SPM (SentencePiece — no BPE Cyrillic bug)
-- **Context window:** 8192 токенов (`llm.rs: CONTEXT_SIZE`)
-- В GGUF есть `tokenizer.chat_template` — движок рендерит промпт сам
+единственный источник правды (core §2.1). Своего «выбранной модели» в
+`config.toml` нет намеренно: два места правды разъедутся, и UI станет врать.
+Движок ставится и обновляется плашкой «Движок перевода (LLM)»
+(`<llama-engine-panel>`), папку можно сменить там же («Изменить путь»).
+
+Поддерживаются **два семейства**, и разница между ними не в качестве, а в
+формате промпта (см. «Prompt format»):
+
+| Модель | Файл | Размер | Формат промпта | translate (36 чанков) |
+|---|---|--:|---|--:|
+| **Index-Translate-9B** (рекомендуется) | `D:\nn\models\translation\Index-Translate-9B\Index-Translate-9B.IQ4_XS.gguf` | 5.0 GiB | `instTrans` | 18–19 с |
+| Gemma-4-12B (baseline) | `D:\nn\models\llm\uncen\gemma-4-12B\gemma-4-12B-it-qat-q4_0-unquantized-heretic-ja-v2.i1-IQ4_NL.gguf` | 6.5 GiB | `chat` | 32–33 с |
+
+- **Index-Translate-9B:** `Index-Translate-9B` (qwen35), IQ4_XS, IFscore 0.821,
+  WMT24++ 0.8601, FLORES 0.8789. Думатель выключен, `enable_thinking: false`.
+  Декод ~99 tok/s, полный оффлоад на 16 ГБ (пик VRAM 6.5 ГиБ).
+- **Gemma-4-12B:** `google/gemma-4` (Gemma4ForCausalLM), 12B dense (not MoE),
+  IQ4_NL, Vocab 256000 SPM (no BPE Cyrillic bug).
+- **Context window:** 8192 токенов (`llm.rs: CONTEXT_SIZE`) у обеих.
+- В GGUF есть `tokenizer.chat_template` — движок рендерит промпт сам.
+- **Index-Translate-2B** (`D:\nn\models\llm\index-translate\Index-Translate-2B.Q4_K_M.gguf`)
+  быстрее всех (11 с), но теряет 3 чанка из 37 на проверке цифр — как основная
+  модель не годится.
 
 ### Prompt format
 Раньше промпт собирался вручную в теги Gemma-4 (`<|turn>…<|channel>thought`).
-**Теперь этого кода нет**: хост отдаёт обычные роли `system` + `user`, а промпт
-рендерит сам движок по `tokenizer.chat_template` модели (в GGUF это
-«Google Gemma 4 Canonical Chat Template»).
+**Этого кода нет**: хост отдаёт обычные роли, а промпт рендерит сам движок по
+`tokenizer.chat_template` модели.
 
+**Формат выбирается явно, и это не косметика.** У моделей разные «родные»
+формы, и промпт, придуманный под одну, для другой выходит из распределения:
+Index-Translate в нашем chat-промпте дублировал соседние реплики и переводил
+текст из lookahead вместо текущего (воспроизводилось при temperature 0 и 0.6,
+то есть это формат входа, а не сэмплирование).
+
+- `PromptStyle::Chat` — наш `system` + `user` с блоками «Previous context»
+  (8 пар EN/RU) и «Future context» (3 EN). Проверен на Gemma-4-12B.
+- `PromptStyle::InstTrans` — канонический формат семейства Index-Translate
+  (`inference/llm/translate.py`, функция `trans_prompt`): исходник в
+  огороженном блоке `Source text:`, требования нумерованным списком с метками
+  `[hard]`/`[soft]`, в конце запрет на пояснения. **Без** блоков контекста.
+- Приоритет: env `DEEDUB_LLM_PROMPT` → настройка `prompt_style` (`auto` по
+  умолчанию) → определение по имени файла модели. Env первым, иначе
+  `run_mt_ab.bat` / `run_pipeline_mt.bat` не смогли бы сравнивать модели.
+- Значение приходит в `PipelineConfig::prompt_style` и читается и переводом, и
+  верификацией **из одного места**, а не разрешается дважды: разойтись они не
+  могут, а разойтись могли — и тогда ретраи собирали бы промпт в чужом формате.
+
+Промпт `chat` (Gemma, проверен):
 ```
 system:
 You are an expert audiovisual translator adapting English video subtitles into Russian for voiceover.
@@ -100,6 +133,56 @@ EN: source text
 - `clean_output` прогоняет ответ через пост-обработку: CoT-блоки `<channel|>`,
   обрезка до первой кириллицы, префиксы («Russian:», «Перевод:»), хвост латиницы
 
+### Верификация (`src-tauri/src/verification/mod.rs`)
+- Проверок в `assess` — 14. Тринадцать из них про текст, и только одна про цифры:
+  `digits_present` добавлена после того, как выяснилось, что правило «пиши числа
+  словами» было прописано и в промпте, и в ретрае, но **не проверялось нигде**:
+  «Сезон 10» и «9.5» доезжали до SRT, где CosyVoice3 цифры не читает.
+- **Ретрай получает список дефектов.** Раньше `build_strict_messages` его не
+  принимал: модель просто переспрашивала то же самое при меньшей температуре,
+  и детерминированно воспроизводила ту же ошибку — на прогоне это давало
+  `RETRY=0 FAIL=2`. Сейчас коды `assess` переводятся в человеческие требования
+  (`issue_hint`) и уходят в промпт как `[hard, fix] …`, а перед каждой попыткой
+  список пересобирается из фактического текста последней генерации.
+- Формат промпта ретрая **тот же**, что у основного перевода, и определяется
+  один раз на весь проход. Ретрай в чужом формате починил бы цифры и сломал
+  остальное (Index вне instTrans начинает дублировать соседние чанки).
+- Изохрония проверяется по символам (`CHARS_PER_SEC_MAX = 22` + допуск 10,
+  чанки короче `MIN_LEN_FOR_BUDGET = 10` не проверяются), тогда как планировщик
+  TTS считает по гласным (`гласные / 4.4`). Критерии не сверены — это известное
+  расхождение, а не баг конкретного прогона.
+- Измеренная изохрония (гласные/4.4 ÷ длительность): Gemma-4-12B **1.70**,
+  Index-9B + instTrans **1.81**, Index-2B + instTrans 1.83. То есть переполнение
+  окон есть у обеих моделей, Index-9B чуть сильнее.
+
+### Цензура слов: `censored_symbol` и `sanitize_for_output`
+Index-Translate-9B маскирует мат звёздочками: чанк с «F you broke cheaters»
+приходил как `Бл*ть, обманщики…`. Наблюдалось **только на 9B** — 2B и Gemma в
+том же тесте не дали ни одной звёздочки, и воспроизводилось одинаково в chat-
+и в instTrans-промпте, то есть формат промпта ни при чём. Механизм (safety
+alignment) не доказан, но и не нужен: чинится тремя независимыми слоями.
+
+1. **Промпт** (оба формата): требование писать слово целиком, в обычных буквах,
+   и прямо объясняет, зачем — «the speech engine cannot pronounce symbols».
+2. **Верификация**: `assess` ловит слово с одиночной `*` между буквами →
+   `censored_symbol` → `issue_hint` просит написать слово полностью. Проверка
+   `**` на markdown это не ловила.
+3. **Санитар** `comm::sanitize_for_output` (вызывается из
+   `translation::clean_output`): выбрасывает замаскированное слово, потому что
+   восстановить заменённую букву детерминированно нельзя. Правильное слово
+   приходит с ретрая; санитар — страховка, чтобы `*` физически не дошёл до
+   CosyVoice3, где небуквенный токен рвёт слово.
+
+**Известная граница фильтра:** маска из двух звёздочек (`f**k`) под `**` не
+попадает — в проекте `**` считается markdown. Наблюдалась только одиночная
+маска. Словарь «`бл*ть` → `блять»` сознательно не делаем: он покрыл бы только
+известные маски, и первое же новое ругательство снова поехало бы в озвучку.
+
+Проверяется `build_test_censor_filter.bat` (бинарник, т.к. харнесс `cargo test`
+на этой машине не стартует) и 9 unit-тестов в `translation::tests` /
+`verification::tests`. Санитар лежит в `comm`, а не в `translation`, чтобы
+тест-бинарник звал production-функцию, а не свою копию.
+
 ### Параметры сэмплинга (`src-tauri/src/llm.rs`)
 Нативных сэмплеров больше нет — параметры уходят в `llama-server` как параметры запроса (`ModelParams` плагина). База берётся из самого GGUF (`tokenizer.ggml.*`), сверху накладываются значения проекта:
 1. `temperature = 0.6`
@@ -127,6 +210,11 @@ EN: source text
 - Замер (ролик 192 с / 38 чанков, RTX 4070 Ti SUPER, полный оффлоад, 03.10.26):
   - `translate: 32.4s`, `verify: 2.5s` (OK=36 RETRY=2 FAIL=0), `tts: 52.1s`,
     **TOTAL 99.6s** (было 177.5s — см. `tasks/03.10.26 Ускорение пайплайна дубляжа.md`)
+- **Замер с Index-Translate-9B + instTrans** (37 чанков, RTX 4070 Ti SUPER,
+  тот же тест, 04.10.26): `translate: 18.2s`, `verify: 1.8s`
+  (**OK=35 RETRY=2 FAIL=0**), `tts: 52.1s`, **TOTAL 83.9s**. То есть
+  перевод в 1.8 раза быстрее Gemma при том же времени озвучки и без потери
+  контента.
 - **Почему думатель выключен:** при бюджете 1500 модель писала 600-1500 токенов
   рассуждений на каждый чанк (на «Bam. Right now.» — 611 токенов думателя) →
   25-30 с на реплику, 238 чанков ≈ 100 минут. Выигрыша в качестве не было:
@@ -175,6 +263,25 @@ EN: source text
 голос), а PASS 2 (`plan_timeline`) и PASS 3 (`place_samples`) работают по исходному
 `index` в хронологическом порядке. **Хронологический обход PASS 1 возвращать
 нельзя** — это ровно то, из-за чего движок перезапускался на каждой смене голоса.
+
+### Референс спикера: `MIN_CLONE_REF_SEC` и слияние коротких кластеров
+Авто-кластеризация CrispASR (`--diarize-speakers auto`) недетерминирована: на
+одном и том же аудио число спикеров гуляет 4 ↔ 5, и лишний кластер собирается из
+шума, смеха и кашля. Такие сегменты проходят фильтр диаризации (≥ 0.15 с), но для
+клона непригодны — CosyVoice3 строит референс из одного непрерывного отрезка, и
+короче секунды эмбеддинг неустойчив.
+
+`MIN_CLONE_REF_SEC = 1.0` живёт в `comm.rs` и это **единственный** источник для
+обоих потребителей:
+- `comm::merge_unclonable_speakers` (вызывается из `parse_engine_diarization`)
+  присоединяет спикера без сегмента ≥ порога к ближайшему по времени валидному,
+  сохраняя его речь в субтитрах, и пересобирает нумерацию без пропусков;
+- `tts::pick_ref_segment` не выбирает для клона сегмент короче порога.
+
+Инвариант: после разбора у каждого спикера есть референс. Проверяется
+`build_test_diar_merge.bat` (отдельный бинарник — харнесс `cargo test` на этой
+машине не стартует, 0xc0000139). Править это в TTS «мягкой деградацией» нельзя:
+причиной был артефакт кластеризации, и лечить её надо до перевода.
 
 Телеметрия в логе: `TTS: синтез N чанков, M спикер(ов), K переключений в хронологии
 → M запусков движка` и `TTS: движок запущен M раз, сумма генерации по движку Xs`.
@@ -250,8 +357,12 @@ build_test_retry.bat
 | `run_pipeline.bat` | Full pipeline test (no dubbing) |
 | `run_tts_pipeline.bat` | Full pipeline with TTS dubbing on `test/test_TTS_dubbing.mp4`, keeps raw/final WAVs (`DEEDUB_KEEP_TTS_WAV=1`) |
 | `build_test_pipeline.bat` | Compile `test-pipeline` binary |
-| `build_test_declick.bat` | Build+run `test-tts-declick`: red test for base-костыля click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched) |
+| `build_test_declick.bat` | Build+run `test-tts-declick`: red test for base-костыля click spikes (ch03/ch27 must drop below 0.20 FS, controls ch01/05/14 untouched). **Падает и это ожидаемо:** фикстуры сняты с base-модели до установки RL, костыль declick гейтом отключён для RL |
 | `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
+| `build_test_diar_merge.bat` | Build+run `test-diar-merge`: слияние спикеров без референса + сплошная нумерация. Зелёный |
+| `build_test_censor_filter.bat` | Build+run `test-censor-filter`: замаскированные слова (`бл*ть`) не доходят до SRT/TTS, markdown и обычный мат не режутся |
+| `run_mt_ab.bat` | A/B перевода на фиксированном входе `temp\mt_ab_input.json`: `run_mt_ab.bat <gguf> [temp] [chat\|insttrans]` |
+| `run_pipeline_mt.bat` | Полный пайплайн с переопределением модели: `run_pipeline_mt.bat <gguf> [temp] [1=с дубляжом] [chat\|insttrans]` |
 
 Пайплайн-батники (`run_pipeline`, `run_tts_pipeline`, `build_test_pipeline`, `build_test_declick`,
 `build_test_retry`, `run_gemma4`) используют тот же MSVC-прелюд, что и шаблоны тулкита
@@ -269,14 +380,32 @@ build_test_retry.bat
 
 ## Config
 File: `~/.deedub/config.toml`
-Fields: `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`
+Fields: `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`, `prompt_style`
 Модель перевода здесь НЕ хранится — она в конфиге плагина движка
-(`%APPDATA%\com.deedub.desktop\app_config.json`, ключ `last_model`).
+(`%APPDATA%\com.deedub.desktop\app_config.json`, ключ `last_model`), туда же
+команда `set_translation_model` пишет выбор из выпадающего списка. Формат
+промпта — app-specific, поэтому живёт здесь (`auto` | `insttrans` | `chat`).
+
+⚠️ `save_config` на фронте шлёт **весь** структур целиком. Любое новое поле
+`AppConfig` обязано появиться и в литерале `save_config`, и в типе ответа
+`get_config` в `src/App.tsx`, иначе оно пропадёт из `config.toml`. Парсинг
+`config.toml` при ошибке логируется в `config::load` (раньше молча отдавался
+пустой дефолт, и «сброс настроек» выглядел как забывчивость приложения).
+
+**Известное ограничение плагина:** `add_model` безусловно выставляет
+`last_model = Some(path)`, даже если модель уже в реестре. Поэтому добавление
+модели в панели сбрасывает выбор из селекта — выбирать активную модель стоит
+после добавления. Сам плагин не меняем (общий репозиторий).
 
 ## Known Issues
 - Occasional STT errors not corrected (e.g., "sea" → "море" instead of "sight" → "зрелище") — 12B model limitation
-- "spотыкалась" instead of "соскальзывал" for "slipped" context — model doesn't infer the tube top slip meaning
+- "спотыкалась" instead of "соскальзывал" for "slipped" context — model doesn't infer the tube top slip meaning
 - CoT occasionally produces "thought: ..." prefix instead of proper `<|channel>thought` format — handled by `clean_output`
+- `9.5` (рейтинг) Index-Translate пишет цифрами даже после ретрая с прямым
+  требованием — ретрай срабатывает в ~50% случаев. Chunk 36 на тестовом ролике
+  поэтому иногда даёт `FAIL`. Конвертер цифр в слова на стороне Rust
+  сознательно не делаем: русские числительные согласуются с существительным
+  («два»/«две»), а модель знает контекст, регулярка — нет.
 
 ## Relevant Source Files
 | File | Purpose |
@@ -285,7 +414,7 @@ Fields: `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`
 | `src-tauri/src/llm.rs` | Фасад LLM: `LlmSession` поверх `tauri-plugin-llama-engine` (движок, модель, параметры, бюджет) |
 | `src-tauri/src/lib.rs` | App init, плагины (logs/downloader/llama-engine), PIPELINE_CANCEL |
 | `src-tauri/src/pipeline.rs` | Pipeline orchestrator |
-| `src-tauri/src/comm.rs` | PipelineContext, SubtitleChunk |
+| `src-tauri/src/comm.rs` | PipelineContext, SubtitleChunk, `MIN_CLONE_REF_SEC`, `merge_unclonable_speakers` |
 | `src-tauri/src/config/mod.rs` | Config load/save |
 | `src-tauri/src/audio_extractor/mod.rs` | WAV extraction |
 | `src-tauri/src/diarization/mod.rs` | CrispASR ASR + speaker diarization (single source) |
@@ -293,7 +422,11 @@ Fields: `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`
 | `src-tauri/src/output/mod.rs` | Subtitle muxing |
 | `src-tauri/src/tts/mod.rs` | TTS дubляж: синтез + retry и declick только для base (`RetryTracker`, `TTS_FULL_FLOOR`, `declick_spikes`) |
 | `src-tauri/src/bin/test_retry_tracker.rs` | Автономный тест сценариев обрезания (работает на этой машине) |
+| `src-tauri/src/bin/test_diar_merge.rs` | Слияние спикеров без референса (работает на этой машине) |
+| `src-tauri/src/bin/test_censor_filter.rs` | Фильтр цензуры слов (работает на этой машине) |
+| `src-tauri/src/bin/test_mt_ab.rs` | Фиксированный вход для A/B перевода (без диаризации и TTS) |
 | `src-tauri/src/paths.rs` | Единый источник путей (core §1.2/§2.5.1): `temp/`, `test/` |
+| `src/App.tsx` | Главная вкладка: выбор файла, селекты модели и формата промпта, прогресс |
 | `src-tauri/Cargo.toml` | Rust dependencies |
 
 ## Research

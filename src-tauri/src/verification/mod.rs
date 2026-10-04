@@ -82,6 +82,8 @@ pub fn verify_with_session(
     let mut fail_count = 0;
     // Последние 3 обработанные пары (EN, RU) — для prev-контекста строгого ретрая
     let mut prev_pairs: Vec<(String, String)> = Vec::new();
+    // Формат промпта ретрая: вычисляется один раз на весь проход, см. ниже.
+    let mut prompt_style: Option<crate::translation::PromptStyle> = None;
 
     for (i, chunk) in chunks.iter_mut().enumerate() {
         if crate::is_cancelled() {
@@ -125,6 +127,17 @@ pub fn verify_with_session(
             session = Some(LlmSession::open(app).map_err(anyhow::Error::msg)?);
         }
         let session = session.as_ref().expect("сессия LLM открыта выше");
+        // Формат определяется ОДИН за весь проход верификации, а не на каждый
+        // ретрай: иначе в лог уходит «формат промпта …» по разу на чанк, а
+        // главное — решение формата перестаёт быть одним решением и может
+        // разойтись между попытками. Кэш заполняется при первом обращении к
+        // движку: раньше открыть его нечем (сессия поднимается лениво).
+        let prompt_style = *prompt_style.get_or_insert_with(|| {
+            crate::translation::PromptStyle::resolve(
+                ctx.config.prompt_style.as_deref(),
+                session.model_path(),
+            )
+        });
 
         let gender = extract_gender(&ctx, chunk);
         // lookahead: до 3 будущих EN-чанков
@@ -140,7 +153,22 @@ pub fn verify_with_session(
 
         for attempt in 0..2 {
             let temp = if attempt == 0 { 0.2 } else { 0.1 };
-            let messages = build_strict_messages(en, &gender, &prev_pairs, &next_ens);
+            // Дефекты пересобираются на КАЖДОЙ попытке из фактического текста
+            // последней генерации: после первой попытки исходный список уже не
+            // описывает то, что модель вернула (и могла исправить одно и
+            // сломать другое).
+            let defects: Vec<String> = assess(&chunk.text, en, duration)
+                .iter()
+                .map(|c| issue_hint(c))
+                .collect();
+            let messages = build_strict_messages(
+                en,
+                &gender,
+                &prev_pairs,
+                &next_ens,
+                &defects,
+                prompt_style,
+            );
             let cleaned = match session.generate(&messages, Some(temp)) {
                 Ok(generation) => crate::translation::clean_output(&generation.text),
                 Err(e) => {
@@ -253,6 +281,20 @@ fn assess(text: &str, en: &str, duration: f64) -> Vec<&'static str> {
         issues.push("markdown_bold");
     }
 
+    // 3a. Замаскированное слово: `бл*ть`, `п*здец`, `f**k`. Проверка `**`
+    // выше это не ловит — она про markdown, а не про цензуру.
+    //
+    // Наблюдалось на Index-Translate-9B: чанк с «F you broke cheaters» пришёл
+    // как «Бл*ть, обманщики…». Причина не в промпте — то же самое получалось в
+    // chat- и в instTrans-формате, тогда как 2B и Gemma в этом же тесте не дали
+    // ни одной звёздочки. То есть модель узнаёт слово и цензурит его сама.
+    //
+    // Проверять надо именно букву с `*` внутри слова, а не любое вхождение `*`:
+    // одиночная звёздочка в «нас*ледие» или курсив — нормальный текст.
+    if trimmed.split_whitespace().any(|w| w.chars().any(|c| c == '*')) {
+        issues.push("censored_symbol");
+    }
+
     // 4. Метки CoT / ревизии
     for &marker in GARBAGE_MARKERS {
         if trimmed.contains(marker) {
@@ -337,6 +379,15 @@ fn assess(text: &str, en: &str, duration: f64) -> Vec<&'static str> {
         }
     }
 
+    // 10. Цифры в тексте. Правило «пиши числа словами» есть и в системном
+    // промпте, и в требованиях instTrans, но ДО этого места оно не
+    // проверялось вообще: ни в одном из 13 предыдущих пунктов. Модель
+    // нарушала его («Сезон 10», «9.5») — и нарушение уходило в SRT и в
+    // озвучку, где CosyVoice3 цифры не читает.
+    if trimmed.chars().any(|c| c.is_ascii_digit()) {
+        issues.push("digits_present");
+    }
+
     issues
 }
 
@@ -356,30 +407,122 @@ fn extract_gender(ctx: &PipelineContext, chunk: &SubtitleChunk) -> String {
         .unwrap_or_else(|| "Person".to_string())
 }
 
+/// Переводит технический код проверки в требование к переводу.
+///
+/// Коды `assess` — это внутренний язык верификатора («too_long_for_timing»);
+/// в промпт их отдавать бессмысленно, модель не знает этих слов. Раньше
+/// повторная генерация вообще не получала списка проблем и просто
+/// переспрашивала то же самое при меньшей температуре — поэтому дефекты
+/// вроде «9.5» цифрами переживали ретрай, а счётчик RETRY оставался нулевым.
+fn issue_hint(code: &str) -> String {
+    match code {
+        "digits_present" => "The previous attempt left digits in the text. Write EVERY number \
+             as Russian words, including decimals and ratings (9.5 -> девять и пять десятых)."
+            .to_string(),
+        "censored_symbol" => "The previous attempt masked a word with an asterisk, like бл*ть. \
+             Write the whole word in full, in plain letters. Never use *, x, dots or other \
+             symbols to stand in for letters — the speech engine cannot pronounce them."
+            .to_string(),
+        "too_long_for_timing" => {
+            "The previous attempt was too long for its time window. Shorten it: drop fillers \
+             and pick shorter words. Output fewer words than the source."
+                .to_string()
+        }
+        "ru_too_short_vs_en" => {
+            "The previous attempt was truncated. Translate the whole source text, do not cut \
+             off the ending."
+                .to_string()
+        }
+        "ru_too_long_vs_en" => {
+            "The previous attempt was bloated compared to the source. Be concise and literal."
+                .to_string()
+        }
+        "unclosed_quote" => "The previous attempt left an unclosed quotation mark.".to_string(),
+        "truncated_connector" => {
+            "The previous attempt ended on a dangling conjunction. Complete the phrase or \
+             shorten it to a whole sentence."
+                .to_string()
+        }
+        "truncated_ellipsis" => {
+            "The previous attempt ended with an ellipsis mid-sentence. Finish the thought or \
+             drop it."
+                .to_string()
+        }
+        "truncated_trailing_punct" => "The previous attempt ends abruptly.".to_string(),
+        "low_cyrillic" => {
+            "The previous attempt is mostly not Russian. Translate the whole text into Russian."
+                .to_string()
+        }
+        "garbage_marker" => {
+            "The previous attempt contained meta-commentary. Output only the translation.".to_string()
+        }
+        "empty/fallback" => "The previous attempt was empty. Output the translation.".to_string(),
+        "angle_bracket" => {
+            "The previous attempt contained angle brackets. Output plain text.".to_string()
+        }
+        "markdown_bold" => "The previous attempt contained markdown. Output plain text.".to_string(),
+        other => format!("The previous attempt had this problem: {other}."),
+    }
+}
+
 /// Строгий промпт (без CoT): модель отвечает сразу переводом, без
 /// «давайте подумаю», без ревизий и вариантов. Низкая температура =
 /// детерминированно.
+///
+/// Формат повторяет формат основного перевода (`PromptStyle`): ретрай,
+/// собранный в чужом для этой модели виде, чинит один дефект и ломает всё
+/// остальное — проверено, что Index-Translate вне instTrans начинает
+/// дублировать и переводить соседние чанки.
 fn build_strict_messages(
     en_text: &str,
     gender: &str,
     prev: &[(String, String)],
     next: &[String],
+    defects: &[String],
+    prompt_style: crate::translation::PromptStyle,
 ) -> Vec<LlmMessage> {
     let speaker_gender = if gender == "female" { "Female" } else if gender == "male" { "Male" } else { "Person" };
 
+    // Формат передаётся готовым, а не разрешается заново: перевод и верификация
+    // обязаны говорить с моделью на одном языке. Повторное разрешение здесь
+    // означало бы второе чтение env/настроек — и возможность разойтись.
+    match prompt_style {
+        crate::translation::PromptStyle::InstTrans => {
+            crate::translation::build_messages_insttrans(en_text, speaker_gender, defects)
+        }
+        crate::translation::PromptStyle::Chat => {
+            build_strict_messages_chat(en_text, speaker_gender, prev, next, defects)
+        }
+    }
+}
+
+fn build_strict_messages_chat(
+    en_text: &str,
+    speaker_gender: &str,
+    prev: &[(String, String)],
+    next: &[String],
+    defects: &[String],
+) -> Vec<LlmMessage> {
     let mut system = String::from(
         "You are an expert audiovisual translator adapting English subtitles into Russian for voiceover.\n\n\
          STRICT RULES:\n\
          1. Output ONLY the final Russian translation. No explanations, no variants, no quotation marks, no markdown.\n\
          2. Fix Speech-to-Text errors contextually.\n\
          3. Keep Russian as short as the English so it fits the audio timing.\n\
-         4. GENDER: Current speaker is ",
+         4. NUMBERS TO WORDS: spell out ALL numbers as Russian words, no digits at all — the speech engine cannot pronounce digits.\n\
+         5. GENDER: Current speaker is ",
     );
     system.push_str(speaker_gender);
     system.push_str(
         ". Match verbs/adjectives.\n\
-         5. NO CENSORSHIP: preserve slang and profanity.",
+         6. NO CENSORSHIP: preserve slang and profanity.",
     );
+    if !defects.is_empty() {
+        system.push_str("\n\nFIX THESE SPECIFIC PROBLEMS — your previous attempt was rejected for them:");
+        for d in defects {
+            system.push_str(&format!("\n- {d}"));
+        }
+    }
 
     let mut user = String::new();
     if !prev.is_empty() {
@@ -465,6 +608,71 @@ mod tests {
             1.0,
         );
         assert!(issues.contains(&"too_long_for_timing"), "22 chars/sec limit");
+    }
+
+    #[test]
+    fn test_assess_digits_flagged() {
+        // Реальные нарушения из прогона Index-Translate: «Сезон 10» и «9.5».
+        // CosyVoice3 цифры не читает, поэтому такой текст обязан уйти в ретрай.
+        assert!(assess("Сезон 10 наконец-то здесь", "Season 10 is here", 3.0)
+            .contains(&"digits_present"));
+        assert!(assess(
+            "Я считаю, что 9.5 был худшим сезоном",
+            "I think 9.5 was the worst season",
+            4.0
+        )
+        .contains(&"digits_present"));
+    }
+
+    #[test]
+    fn test_assess_spelled_numbers_ok() {
+        let issues = assess(
+            "Девять целых пять десятых был худшим сезоном",
+            "9.5 was the worst season",
+            4.0,
+        );
+        assert!(!issues.contains(&"digits_present"));
+    }
+
+    // ---- Цензура слов (Index-Translate-9B) ----
+
+    #[test]
+    fn test_assess_masked_word_flagged() {
+        // Реальный вывод 9B: чанк с матом пришёл с `Бл*ть`. Проверка `**`
+        // (markdown) это не ловит, нужна отдельная.
+        let issues = assess(
+            "Не могут позволить себе ПК. Бл*ть, обманщики",
+            "F you broke cheaters",
+            3.0,
+        );
+        assert!(
+            issues.contains(&"censored_symbol"),
+            "замаскированное слово должно уходить в ретрай, а не в озвучку"
+        );
+    }
+
+    #[test]
+    fn test_assess_plain_profanity_not_flagged() {
+        // Мат без цензуры — законный результат, ретрай тут не нужен.
+        let issues = assess("Чёрт, это не весело", "This is not fun", 2.0);
+        assert!(!issues.contains(&"censored_symbol"));
+    }
+
+    #[test]
+    fn test_assess_markdown_bold_not_flagged_as_censorship() {
+        // `**Привет**` — markdown, цензуры нет. Иначе формат ломался бы вхолостую.
+        let issues = assess("**Привет** мир", "Hello world", 2.0);
+        assert!(issues.contains(&"markdown_bold"));
+        assert!(!issues.contains(&"censored_symbol"));
+    }
+
+    #[test]
+    fn test_issue_hint_for_masked_word_mentions_no_symbols() {
+        let hint = issue_hint("censored_symbol");
+        assert!(
+            hint.contains("whole word in full"),
+            "подсказка ретраю должна требовать слово целиком: {hint}"
+        );
     }
 
     #[test]
