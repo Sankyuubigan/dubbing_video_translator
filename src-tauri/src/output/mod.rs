@@ -177,17 +177,22 @@ fn run_ffmpeg_mux_with_dub(
     Ok(())
 }
 
-fn write_srt(chunks: &[SubtitleChunk], suffix: &str) -> Result<String> {
-    let srt_path = crate::paths::temp_file(&format!("deedub_subtitles_{}.srt", suffix))
-        .to_string_lossy()
-        .to_string();
-
+/// Чистая функция: список чанков → содержимое SRT. Без файлов и без
+/// побочных эффектов — её можно звать и из тест-бинарника, и из юнит-теста.
+///
+/// `SKIP_MARKER` фильтруется здесь, а не в `write_srt`, потому что это
+/// инвариант формата, а не особенность записи на диск. `tts` делает то же
+/// сравнение (`tts/mod.rs`), и раньше расходились только две из трёх точек
+/// потребления, из-за чего служебный маркер `(-)` попадал в субтитры.
+pub fn build_srt_content(chunks: &[SubtitleChunk]) -> String {
     let mut content = String::from("\u{FEFF}"); // UTF-8 BOM
     let mut idx = 0;
 
     for chunk in chunks.iter() {
         let text = chunk.text.trim();
-        if text.is_empty() {
+        // Метка пропуска — не текст для показа. Чанк, не прошедший
+        // верификацию, молчит в озвучке (tts) и не должен занимать экран.
+        if text.is_empty() || text == crate::comm::SKIP_MARKER {
             continue;
         }
         idx += 1;
@@ -199,6 +204,16 @@ fn write_srt(chunks: &[SubtitleChunk], suffix: &str) -> Result<String> {
             .unwrap_or("Speaker");
         content.push_str(&format!("{}\n{} --> {}\n[{}] {}\n\n", idx, start, end, speaker, text));
     }
+
+    content
+}
+
+fn write_srt(chunks: &[SubtitleChunk], suffix: &str) -> Result<String> {
+    let srt_path = crate::paths::temp_file(&format!("deedub_subtitles_{}.srt", suffix))
+        .to_string_lossy()
+        .to_string();
+
+    let content = build_srt_content(chunks);
 
     std::fs::write(&srt_path, content)
         .map_err(|e| { log::error!("output: Ошибка записи SRT: {:#}", e); e })
@@ -226,6 +241,86 @@ fn generate_output_path(input: &str, format: &str) -> String {
         .join(format!("{}_subbed.{}", stem, format))
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::comm::SKIP_MARKER;
+
+    fn chunk(start: f64, end: f64, text: &str) -> SubtitleChunk {
+        SubtitleChunk {
+            start_sec: start,
+            end_sec: end,
+            text: text.to_string(),
+            speaker_id: Some("Speaker_4".to_string()),
+            word_timestamps: None,
+        }
+    }
+
+    /// Номера cue-блоков. Разбор, а не поиск подстроки: перед первым индексом
+    /// стоит BOM, поэтому `"\n1\n"` не матчится.
+    fn cue_indices(srt: &str) -> Vec<u32> {
+        srt.lines()
+            .filter_map(|l| {
+                let t = l.trim().trim_start_matches('\u{FEFF}').trim();
+                if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
+                    t.parse().ok()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Регрессия: `SKIP_MARKER` — служебная метка, а не текст. Чанк, не
+    /// прошедший верификацию, молчит в TTS и не должен занимать экран.
+    #[test]
+    fn test_skip_marker_not_written_to_srt() {
+        let srt = build_srt_content(&[
+            chunk(108.44, 111.19, "Ну что ж, я заберу вас всех."),
+            chunk(180.354, 191.840, SKIP_MARKER),
+        ]);
+        assert!(!srt.contains(SKIP_MARKER), "маркер попал в SRT: {}", srt);
+        assert!(!srt.contains("00:03:00,354"), "тайминг маркера в SRT");
+        assert!(srt.contains("Ну что ж, я заберу вас всех."));
+    }
+
+    /// Нумерация сплошная: `idx` растёт только для записанных cue, поэтому
+    /// пропуск не оставляет дыры и не сдвигает остальные номера.
+    #[test]
+    fn test_indices_contiguous_after_skip() {
+        let srt = build_srt_content(&[
+            chunk(0.0, 1.0, "первый"),
+            chunk(1.0, 2.0, SKIP_MARKER),
+            chunk(2.0, 3.0, "второй"),
+        ]);
+        assert_eq!(cue_indices(&srt), vec![1, 2]);
+    }
+
+    /// Обрезка пробелов не должна обойти фильтр: `write_srt` триммит перед
+    /// сравнением, и `"  (-)  "` тоже должен отфильтроваться.
+    #[test]
+    fn test_skip_marker_with_surrounding_spaces() {
+        let srt = build_srt_content(&[chunk(0.0, 1.0, "  (-)  ")]);
+        assert!(!srt.contains("-->"), "маркер в пробелах записан: {}", srt);
+    }
+
+    #[test]
+    fn test_empty_text_still_filtered() {
+        let srt = build_srt_content(&[chunk(0.0, 1.0, "   ")]);
+        assert!(!srt.contains("-->"), "пустой чанк записан: {}", srt);
+    }
+
+    /// Рефакторинг вынес форматирование в чистую функцию — формат не должен
+    /// поехать: BOM для `mov_text`, `,` в миллисекундах, `[Speaker]`.
+    #[test]
+    fn test_srt_format_preserved() {
+        let srt = build_srt_content(&[chunk(0.24, 2.44, "Вот во что верят любители.")]);
+        assert!(srt.starts_with('\u{FEFF}'), "потерян UTF-8 BOM");
+        assert!(srt.contains("00:00:00,240 --> 00:00:02,440"), "{}", srt);
+        assert!(srt.contains("[Speaker_4] Вот во что верят любители."), "{}", srt);
+    }
 }
 
 

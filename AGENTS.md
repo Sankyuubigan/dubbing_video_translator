@@ -183,6 +183,36 @@ alignment) не доказан, но и не нужен: чинится трем
 `verification::tests`. Санитар лежит в `comm`, а не в `translation`, чтобы
 тест-бинарник звал production-функцию, а не свою копию.
 
+### `SKIP_MARKER` — служебная метка «чанк выкинут» (3 потребителя)
+Чанк, не прошедший верификацию после 2 ретраев, получает
+`text = SKIP_MARKER` (`"(-)"`, `comm.rs:5`). Это **внутренняя метка, а не
+текст для показа**, и её обязаны уважать все, кто читает `chunk.text`:
+
+| Потребитель | Проверка | Смысл |
+|---|---|---|
+| `verification::assess` | `trimmed == SKIP_MARKER → без дефектов` | метка сама не считается браком |
+| `tts` | `text == SKIP_MARKER → continue` | молчит в озвучке |
+| `output::build_srt_content` | `text == SKIP_MARKER → continue` | не занимает экран |
+
+Раньше `write_srt` проверял только `is_empty()`, и маркер **уезжала в
+пользовательский SRT**: на экране 11 секунд висело `(-)`. Замер (04.10.26,
+Index-9B, chunk 36 = `FAIL` по `9.5`): RU SRT содержал 37 cue, из них
+последний — `[Speaker_1] (-)`; после правки 36 cue, маркера 0, нумерация
+сплошная.
+
+Фильтр живёт в чистой функции `output::build_srt_content` (без файлов и
+побочных эффектов), а `write_srt` только пишет её результат на диск — так
+тест-бинарник проверяет production-код. `idx` растёт **после** `continue`,
+поэтому пропуск не оставляет дыры в нумерации.
+
+Проверяется `build_test_srt_filter.bat` (бинарник) и 5 unit-тестов в
+`output::tests`.
+
+**Не путать с отказом от FAIL.** `SKIP_MARKER` означает «молча и без
+субтитра», а не «показать исходник». Если чанк падает регулярно (как 36-й с
+`9.5`), это проблема верификации, а не формата вывода — метку нельзя
+разворачивать в фолбэк на английский текст молча.
+
 ### Параметры сэмплинга (`src-tauri/src/llm.rs`)
 Нативных сэмплеров больше нет — параметры уходят в `llama-server` как параметры запроса (`ModelParams` плагина). База берётся из самого GGUF (`tokenizer.ggml.*`), сверху накладываются значения проекта:
 1. `temperature = 0.6`
@@ -361,6 +391,7 @@ build_test_retry.bat
 | `build_test_retry.bat` | Build+run `test-retry-tracker`: all truncation scenarios (ch7/ch27/ch34/ch35/ch38/ch36/monotonic) via real RetryTracker |
 | `build_test_diar_merge.bat` | Build+run `test-diar-merge`: слияние спикеров без референса + сплошная нумерация. Зелёный |
 | `build_test_censor_filter.bat` | Build+run `test-censor-filter`: замаскированные слова (`бл*ть`) не доходят до SRT/TTS, markdown и обычный мат не режутся |
+| `build_test_srt_filter.bat` | Build+run `test-srt-filter`: `SKIP_MARKER` не попадает в SRT, нумерация cue сплошная |
 | `run_mt_ab.bat` | A/B перевода на фиксированном входе `temp\mt_ab_input.json`: `run_mt_ab.bat <gguf> [temp] [chat\|insttrans]` |
 | `run_pipeline_mt.bat` | Полный пайплайн с переопределением модели: `run_pipeline_mt.bat <gguf> [temp] [1=с дубляжом] [chat\|insttrans]` |
 
@@ -419,11 +450,12 @@ Fields: `ffmpeg_path`, `output_format`, `enable_dubbing`, `mix_volume`, `prompt_
 | `src-tauri/src/audio_extractor/mod.rs` | WAV extraction |
 | `src-tauri/src/diarization/mod.rs` | CrispASR ASR + speaker diarization (single source) |
 | `src-tauri/src/stt/mod.rs` | Consumes diarization transcript |
-| `src-tauri/src/output/mod.rs` | Subtitle muxing |
+| `src-tauri/src/output/mod.rs` | Subtitle muxing, `build_srt_content` — чистая сборка SRT с фильтром `SKIP_MARKER` |
 | `src-tauri/src/tts/mod.rs` | TTS дubляж: синтез + retry и declick только для base (`RetryTracker`, `TTS_FULL_FLOOR`, `declick_spikes`) |
 | `src-tauri/src/bin/test_retry_tracker.rs` | Автономный тест сценариев обрезания (работает на этой машине) |
 | `src-tauri/src/bin/test_diar_merge.rs` | Слияние спикеров без референса (работает на этой машине) |
 | `src-tauri/src/bin/test_censor_filter.rs` | Фильтр цензуры слов (работает на этой машине) |
+| `src-tauri/src/bin/test_srt_filter.rs` | `SKIP_MARKER` не попадает в SRT (работает на этой машине) |
 | `src-tauri/src/bin/test_mt_ab.rs` | Фиксированный вход для A/B перевода (без диаризации и TTS) |
 | `src-tauri/src/paths.rs` | Единый источник путей (core §1.2/§2.5.1): `temp/`, `test/` |
 | `src/App.tsx` | Главная вкладка: выбор файла, селекты модели и формата промпта, прогресс |

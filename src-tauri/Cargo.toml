@@ -40,6 +40,10 @@ path = "src/bin/test_diar_merge.rs"
 name = "test-censor-filter"
 path = "src/bin/test_censor_filter.rs"
 
+[[bin]]
+name = "test-srt-filter"
+path = "src/bin/test_srt_filter.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 

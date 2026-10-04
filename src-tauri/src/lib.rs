@@ -4,7 +4,7 @@ pub mod config;
 mod diarization;
 mod ffmpeg;
 mod llm;
-mod output;
+pub mod output;
 pub mod paths;
 pub mod pipeline;
 mod stt;
