@@ -1,6 +1,6 @@
 [package]
 name = "deedub"
-version = "26.9.4"
+version = "26.10.1"
 description = "DeeDub — локальный перевод видео с субтитрами и дубляжом"
 authors = ["you"]
 license = ""
@@ -43,6 +43,10 @@ path = "src/bin/test_censor_filter.rs"
 [[bin]]
 name = "test-srt-filter"
 path = "src/bin/test_srt_filter.rs"
+
+[[bin]]
+name = "test-pitch-live"
+path = "src/bin/test_pitch_live.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }

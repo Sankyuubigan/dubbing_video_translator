@@ -1,7 +1,7 @@
 mod audio_extractor;
 pub mod comm;
 pub mod config;
-mod diarization;
+pub mod diarization;
 mod ffmpeg;
 mod llm;
 pub mod output;

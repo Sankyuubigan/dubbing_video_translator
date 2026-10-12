@@ -1,4 +1,4 @@
-﻿use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk};
+use crate::comm::{PipelineContext, SpeakerSegment, SubtitleChunk};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -16,41 +16,97 @@ fn load_wav_spec(path: &str) -> Result<(Vec<f32>, u32)> {
 }
 /// Определение основного тона (F0) через автокорреляцию.
 /// Возвращает медианную частоту в Гц или None, если речь не обнаружена.
-fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
-    let min_freq = 50.0;
-    let max_freq = 500.0;
+///
+/// Известное ограничение, которое НЕ починено: берётся глобальный максимум
+/// автокорреляции, а её пики стоят и на периоде T, и на 2T. На сильной второй
+/// гармонике максимум уезжает на 2T, и женский голос читается вдвое ниже
+/// (измерено: вместо ~235 Гц детектор даёт ~102). Попытки починить это
+/// проверкой «пик на lag/2 такого же уровня» и вариантом «пик на lag/2 выше
+/// соседей» дали обратный брак: на cecelia мужские голоса 105/113 Гц
+/// превращались в 254/200 Гц и все спикеры становились «женщинами». То есть
+/// простая эвристика по уровню корреляции либо не ловит настоящую октавную
+/// ошибку, либо создаёт ложную. Нужен метод с разрешением по форме пика, а не
+/// по его высоте; на синтетических синусах это не отличить — там пик всегда
+/// чистый.
+///
+/// `pub` — зовёт тест-бинарник `test-pitch-live`, который меряет детектор на
+/// живых записях. Приватной оставалась бы, и тогда единственной проверкой
+/// была бы «посмотреть на видео глазами».
+pub fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
+    let min_freq = 70.0;
+    let max_freq = 450.0;
     let min_lag = (sample_rate as f64 / max_freq) as usize;
     let max_lag = (sample_rate as f64 / min_freq) as usize;
-    let frame_size = 1024;
-    let hop_size = 512;
+    let frame_size = 4096;
+    let hop_size = 1024;
+    let hi_lag = max_lag.min(frame_size / 2);
     let mut pitches: Vec<f64> = Vec::new();
     let mut pos = 0;
     while pos + frame_size <= samples.len() {
-        let frame = &samples[pos..pos + frame_size];
-        let energy: f32 = frame.iter().map(|&x| x * x).sum();
-        if energy < 1e-6 {
+        let raw_frame = &samples[pos..pos + frame_size];
+        let mean: f32 = raw_frame.iter().sum::<f32>() / frame_size as f32;
+        let mut frame = vec![0.0f32; frame_size];
+        let mut energy: f32 = 0.0;
+        for (i, &x) in raw_frame.iter().enumerate() {
+            let hann =
+                0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (frame_size - 1) as f64).cos())
+                    as f32;
+            let val = (x - mean) * hann;
+            frame[i] = val;
+            energy += val * val;
+        }
+        if energy < 1e-5 {
             pos += hop_size;
             continue;
         }
-        let mut best_lag = 0;
-        let mut best_corr = 0.0f32;
-        for lag in min_lag..=max_lag.min(frame_size / 2) {
-            let mut corr = 0.0f32;
-            for i in 0..(frame_size - lag) {
-                corr += frame[i] * frame[i + lag];
+
+        // YIN difference function d(tau) = sum (x[j] - x[j+tau])^2
+        let mut d = vec![0.0f32; hi_lag + 1];
+        for tau in 1..=hi_lag {
+            let mut acc = 0.0f32;
+            for j in 0..(frame_size - tau) {
+                let diff = frame[j] - frame[j + tau];
+                acc += diff * diff;
             }
-            let lag_energy: f32 = frame[lag..].iter().map(|&x| x * x).sum();
-            let denom = (energy * lag_energy).sqrt();
-            if denom > 1e-8 {
-                corr /= denom;
-            }
-            if corr > best_corr {
-                best_corr = corr;
-                best_lag = lag;
+            d[tau] = acc;
+        }
+
+        // Cumulative mean normalized difference d'(tau)
+        let mut cmnd = vec![1.0f32; hi_lag + 1];
+        let mut running = 0.0f32;
+        for tau in 1..=hi_lag {
+            running += d[tau];
+            if running > 1e-12 {
+                cmnd[tau] = d[tau] * tau as f32 / running;
             }
         }
-        if best_corr > 0.3 && best_lag > 0 {
-            pitches.push(sample_rate as f64 / best_lag as f64);
+
+        // Pick first local minimum below threshold 0.15, or global minimum if < 0.6
+        let mut period_opt = None;
+        let yin_accept = 0.15;
+        for tau in min_lag..=hi_lag {
+            if cmnd[tau] < yin_accept
+                && cmnd[tau] < cmnd[tau - 1]
+                && (tau == hi_lag || cmnd[tau] <= cmnd[tau + 1])
+            {
+                period_opt = Some(tau);
+                break;
+            }
+        }
+        if period_opt.is_none() {
+            let mut best = min_lag;
+            for tau in min_lag..=hi_lag {
+                if cmnd[tau] < cmnd[best] {
+                    best = tau;
+                }
+            }
+            if cmnd[best] < 0.6 {
+                period_opt = Some(best);
+            }
+        }
+
+        if let Some(period) = period_opt {
+            pitches.push(sample_rate as f64 / period as f64);
         }
         pos += hop_size;
     }
@@ -62,12 +118,23 @@ fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
 }
 /// Определяет пол для каждого уникального спикера на основе высоты тона.
 /// Порог: < 160 Гц → male, >= 160 Гц → female.
-/// Сколько сегментов на спикера берём для оценки тона (самые длинные).
-/// Медиана основного тона — устойчивая оценка: трёх самых длинных реплик
-/// достаточно, а короткие вставки («yeah», «uh») как раз её ломают. Раньше
-/// автокорреляция гонялась по ВСЕМ сегментам ролика — десятки секунд CPU в
-/// один поток, уже после того как движок освободил видеопамять.
-const PITCH_SEGMENTS_PER_SPEAKER: usize = 3;
+/// Сколько ОЦЕНОК тона набираем на спикера для медианы.
+///
+/// Считается по числу полученных оценок, а не по числу взятых сегментов:
+/// сегмент, где тон не определился, не должен расходовать место в выборке.
+/// Медиана по нескольким точкам устойчива к единичным октавным сбоям.
+///
+/// Не гоняем детектор по всем сегментам ролика: это десятки секунд CPU в один
+/// поток уже после того, как движок освободил видеопамять.
+const PITCH_ESTIMATES_PER_SPEAKER: usize = 5;
+
+/// Порог пола по основному тону: ниже — male, выше — female.
+///
+/// Вынесен в константу, потому что участвует в решении сразу в двух местах
+/// (детектор и тест-бинарник) и должно быть одно на оба, а не «одинаковое
+/// число в двух местах».
+pub const GENDER_PITCH_THRESHOLD_HZ: f64 = 160.0;
+
 /// Определяет пол для каждого уникального спикера на основе высоты тона.
 /// Порог: < 160 Гц → male, >= 160 Гц → female.
 fn detect_speaker_genders(
@@ -98,7 +165,16 @@ fn detect_speaker_genders(
     for (speaker_id, mut windows) in by_speaker {
         windows.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)));
         let mut pitches: Vec<f64> = Vec::new();
-        for (start, end) in windows.iter().take(PITCH_SEGMENTS_PER_SPEAKER) {
+        // Считаем до нужного ЧИСЛА ОЦЕНОК, а не до числа сегментов.
+        // Раньше брались ровно три самых длинных сегмента, и если хоть один
+        // из них не дал тона (короткий, шумный, с тишиной), медиана считалась
+        // по одной-двум точкам — а это ровно тот случай, когда результат
+        // переворачивается. Теперь короткий сегмент просто не занимает места
+        // в выборке, и мы идём дальше по списку.
+        for (start, end) in windows.iter() {
+            if pitches.len() >= PITCH_ESTIMATES_PER_SPEAKER {
+                break;
+            }
             if crate::is_cancelled() {
                 log::info!("GenderDetection: прервано пользователем");
                 return HashMap::new();
@@ -112,7 +188,7 @@ fn detect_speaker_genders(
         }
         pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = pitches[pitches.len() / 2];
-        let gender = if median < 160.0 { "male" } else { "female" };
+        let gender = if median < GENDER_PITCH_THRESHOLD_HZ { "male" } else { "female" };
         log::info!(
             "GenderDetection: {} median pitch={:.0} Hz → {} ({} сегм. из {})",
             speaker_id,
@@ -133,6 +209,7 @@ struct EngineSeg {
     timestamps: Option<Timestamps>,
     speaker: String,
     text: String,
+    words: Option<Vec<EngineWord>>,
 }
 #[derive(Deserialize)]
 struct Offsets {
@@ -143,6 +220,22 @@ struct Offsets {
 struct Timestamps {
     from: String,
     to: String,
+}
+
+/// Слово с таймингом — движок отдаёт их в каждом сегменте, см. `words` в JSON.
+/// Раньше поле `words` не разбиралось вовсе, и `SubtitleChunk::word_timestamps`
+/// оставалось `None` по всему пайплайну: данные приходили из движка и
+/// выбрасывались.
+#[derive(Deserialize)]
+struct EngineWord {
+    text: String,
+    offsets: Option<TimestampsMs>,
+}
+
+#[derive(Deserialize)]
+struct TimestampsMs {
+    from: i64,
+    to: i64,
 }
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -184,6 +277,70 @@ fn log_tail(path: &Path, prefix: &str) {
         }
     }
 }
+
+/// Разбивает длинный сегмент по пословным таймингам на реплики по концам предложений и паузам.
+fn split_segment_by_words(
+    speaker_id: &str,
+    text: &str,
+    start: f64,
+    end: f64,
+    words: &[crate::comm::WordTimestamp],
+) -> Vec<SubtitleChunk> {
+    if words.is_empty() || end - start <= 8.0 {
+        return vec![SubtitleChunk {
+            start_sec: start,
+            end_sec: end,
+            text: text.to_string(),
+            speaker_id: Some(speaker_id.to_string()),
+            word_timestamps: if words.is_empty() { None } else { Some(words.to_vec()) },
+        }];
+    }
+
+    let mut result = Vec::new();
+    let mut current_words = Vec::new();
+    let mut chunk_start = words[0].start_sec;
+
+    for (i, w) in words.iter().enumerate() {
+        current_words.push(w.clone());
+        let is_end_punct = w.word.ends_with('.') || w.word.ends_with('!') || w.word.ends_with('?') || w.word.ends_with('…');
+        let is_last = i + 1 == words.len();
+        let next_gap = if !is_last { words[i + 1].start_sec - w.end_sec } else { 0.0 };
+
+        let chunk_dur = w.end_sec - chunk_start;
+        if is_end_punct || next_gap > 0.5 || chunk_dur > 7.0 || is_last {
+            if !current_words.is_empty() {
+                let chunk_end = current_words.last().unwrap().end_sec;
+                let chunk_text = current_words.iter().map(|kw| kw.word.clone()).collect::<Vec<_>>().join(" ");
+                if !chunk_text.trim().is_empty() && chunk_end > chunk_start {
+                    result.push(SubtitleChunk {
+                        start_sec: chunk_start,
+                        end_sec: chunk_end.max(chunk_start + 0.2),
+                        text: chunk_text,
+                        speaker_id: Some(speaker_id.to_string()),
+                        word_timestamps: Some(current_words.clone()),
+                    });
+                }
+                current_words.clear();
+                if !is_last {
+                    chunk_start = words[i + 1].start_sec;
+                }
+            }
+        }
+    }
+
+    if result.is_empty() {
+        vec![SubtitleChunk {
+            start_sec: start,
+            end_sec: end,
+            text: text.to_string(),
+            speaker_id: Some(speaker_id.to_string()),
+            word_timestamps: Some(words.to_vec()),
+        }]
+    } else {
+        result
+    }
+}
+
 /// Разбирает diarized_json движка в (speaker_segments, subtitle_chunks).
 fn parse_engine_diarization(
     json_path: &Path,
@@ -234,13 +391,20 @@ fn parse_engine_diarization(
             speaker_id: speaker_id.clone(),
             gender: None,
         });
-        subtitle_chunks.push(SubtitleChunk {
-            start_sec: start,
-            end_sec: end,
-            text: text.to_string(),
-            speaker_id: Some(speaker_id),
-            word_timestamps: None,
-        });
+        let words = seg.words.as_ref().map(|ws| {
+            ws.iter()
+                .filter_map(|w| {
+                    let o = w.offsets.as_ref()?;
+                    Some(crate::comm::WordTimestamp {
+                        word: w.text.clone(),
+                        start_sec: o.from as f64 / 1000.0,
+                        end_sec: o.to as f64 / 1000.0,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }).unwrap_or_default();
+        let split_chunks = split_segment_by_words(&speaker_id, text, start, end, &words);
+        subtitle_chunks.extend(split_chunks);
     }
 if speaker_segments.is_empty() {
     return None;

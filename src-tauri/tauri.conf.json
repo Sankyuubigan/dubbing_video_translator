@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
 "productName": "DeeDub",
   "mainBinaryName": "deedub",
-  "version": "26.9.4",
+  "version": "26.10.1",
   "identifier": "com.deedub.desktop",
   "build": {
     "frontendDist": "../dist",
