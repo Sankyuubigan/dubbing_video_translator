@@ -48,6 +48,10 @@ path = "src/bin/test_srt_filter.rs"
 name = "test-pitch-live"
 path = "src/bin/test_pitch_live.rs"
 
+[[bin]]
+name = "test-gender-fixtures"
+path = "src/bin/test_gender_fixtures.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 

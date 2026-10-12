@@ -1,25 +1,32 @@
-//! Сравнение детекторов F0 на РЕАЛЬНОМ аудио с метками спикеров.
+//! Сверка продового определения тона с НЕЗАВИСИМЫМ ground truth на реальном аудио.
 //!
-//! Зачем отдельный бинарник: синтетические синусы тут врут. YIN на синусах
-//! даёт точность 2 Гц, а на живой речи с шумом и реверберацией срабатывает
-//! на 1.9% кадров — то есть почти не работает. Проверять детектор надо на
-//! записи с реальными голосами, где известен правильный ответ по тексту:
-//! в диалоге реплики-вопросы и реплики-ответы чередуются.
+//! Зачем отдельный бинарник: харнесс `cargo test` на этой машине не стартует,
+//! а «посмотреть на видео глазами» — не проверка. Бинарник берёт реальную
+//! запись и JSON диаризации движка и для каждого сегмента считает тон ДВАЖДЫ:
 //!
-//! Печатает по каждому спикеру: покрытие (доля окон с определённым тоном),
-//! медиану и распределение — для КАЖДОГО из детекторов. По этим числам
-//! выбирается метод, а не на глаз и не по «красиво на синусах».
+//! - продовым [`deedub_lib::comm::voice::voice_track`] — тем же кодом, что
+//!   работает в пайплайне;
+//! - эталонным методом по **расстоянию между соседними пиками спектра**
+//!   внутри гармонической полосы. Этот метод трекером не является и октавной
+//!   ошибки в нём быть не может по построению: шаг между гармониками равен F0.
 //!
-//! Запуск: cargo run --bin test-pitch-live --release -- <wav> <engine.json>
+//! Совпадение пола по обоим методам и есть критерий. Расхождение означает, что
+//! продовый детектор врёт — и где именно врёт, видно по таблице.
+//!
+//! Запуск: test-pitch-live <wav> <engine.json>
+//! Пример: test-pitch-live temp\deedub_audio.wav temp\mel20.json
 
 use std::collections::HashMap;
 
-const MIN_F: f64 = 50.0;
-const MAX_F: f64 = 500.0;
-const FRAME: usize = 1024;
-const HOP: usize = 512;
-/// Порог пола из продакшн-кода.
-const GENDER_HZ: f64 = 160.0;
+use deedub_lib::comm::voice;
+
+const HARMONIC_N: usize = 4096;
+const HARMONIC_HOP: usize = HARMONIC_N / 2;
+const PEAK_MIN_HZ: f64 = 70.0;
+const PEAK_MAX_HZ: f64 = 1200.0;
+const PEAK_REL_LEVEL: f64 = 0.12;
+const MIN_SPIKES: usize = 4;
+const ENERGY_FLOOR_RMS: f64 = 0.015;
 
 fn load_wav(path: &str) -> Option<(Vec<f32>, u32)> {
     let r = hound::WavReader::open(path).ok()?;
@@ -32,134 +39,144 @@ fn load_wav(path: &str) -> Option<(Vec<f32>, u32)> {
     Some((s, sr))
 }
 
-/// Текущий продовский метод: глобальный максимум нормированной автокорреляции.
-/// Возвращает все тона кадра (медиана берётся вызывающим).
-fn autocorr_pitches(frame: &[f32], sr: u32) -> Vec<f64> {
-    let min_lag = (sr as f64 / MAX_F) as usize;
-    let max_lag = ((sr as f64 / MIN_F) as usize).min(frame.len() / 2);
-    let energy: f32 = frame.iter().map(|x| x * x).sum();
-    if energy < 1e-6 || max_lag <= min_lag {
-        return Vec::new();
+/// Эталонный F0: медиана расстояний между соседними пиками спектра.
+fn harmonic_pitch(samples: &[f32], sr: u32) -> Option<f64> {
+    let filtered = voice::highpass(samples, sr, PEAK_MIN_HZ);
+    let frames: Vec<&[f32]> = (0..filtered.len().saturating_sub(HARMONIC_N))
+        .step_by(HARMONIC_HOP)
+        .map(|i| &filtered[i..i + HARMONIC_N])
+        .collect();
+    if frames.is_empty() {
+        return None;
     }
-    let mut out = Vec::new();
-    for lag in min_lag..=max_lag {
-        let mut corr = 0.0f32;
-        for i in 0..(frame.len() - lag) {
-            corr += frame[i] * frame[i + lag];
+    let rms_of = |fr: &[f32]| -> f64 {
+        fr.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / fr.len() as f64
+    };
+    let rms: Vec<f64> = frames.iter().map(|f| rms_of(f).sqrt()).collect();
+    let mut sorted = rms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let gate = sorted[sorted.len() / 2] * 0.7; // громкие 30% кадров
+
+    let mut ests: Vec<f64> = Vec::new();
+    for (fr, r) in frames.iter().zip(rms.iter()) {
+        if *r < gate.max(ENERGY_FLOOR_RMS) {
+            continue;
         }
-        let lag_energy: f32 = frame[lag..].iter().map(|x| x * x).sum();
-        let denom = (energy * lag_energy).sqrt();
-        if denom > 1e-8 && corr / denom > 0.3 {
-            out.push(sr as f64 / lag as f64);
+        let mut win: Vec<f64> = fr.iter().map(|v| *v as f64).collect();
+        let n = win.len();
+        for (i, v) in win.iter_mut().enumerate() {
+            let hann =
+                0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64).cos());
+            *v *= hann;
         }
+        let spectrum = real_fft(&win);
+        let bins_per_hz = HARMONIC_N as f64 / sr as f64;
+        let mut peaks: Vec<usize> = Vec::new();
+        for i in 1..spectrum.len() - 1 {
+            if spectrum[i] > spectrum[i - 1] && spectrum[i] >= spectrum[i + 1] {
+                let hz = i as f64 / bins_per_hz;
+                if (PEAK_MIN_HZ..=PEAK_MAX_HZ).contains(&hz) {
+                    peaks.push(i);
+                }
+            }
+        }
+        if peaks.len() < MIN_SPIKES {
+            continue;
+        }
+        let max = peaks
+            .iter()
+            .map(|&i| spectrum[i])
+            .fold(f64::MIN, f64::max);
+        peaks.retain(|&i| spectrum[i] > max * PEAK_REL_LEVEL);
+        if peaks.len() < MIN_SPIKES {
+            continue;
+        }
+        let mut d: Vec<f64> = peaks
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as f64 / bins_per_hz)
+            .filter(|d| (70.0..400.0).contains(d))
+            .collect();
+        if d.len() < 2 {
+            continue;
+        }
+        d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ests.push(d[d.len() / 2]);
+    }
+    if ests.is_empty() {
+        return None;
+    }
+    ests.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(ests[ests.len() / 2])
+}
+
+/// БПФ с вещественными входными данными (длина — степень двойки).
+fn real_fft(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    // БПФ Кули-Тьюки: упаковка двух вещественных последовательностей в одну
+    // комплексную. Для длин кадра 4096 этого хватает с большим запасом.
+    let mut re = vec![0.0f64; n];
+    let mut im = vec![0.0f64; n];
+    for i in 0..n / 2 {
+        let a = input[2 * i];
+        let b = input[2 * i + 1];
+        re[i] = a;
+        im[i] = b;
+    }
+    fft_inplace(&mut re, &mut im);
+    // Восстановление спектра исходной последовательности
+    let mut out = vec![0.0f64; n / 2 + 1];
+    for k in 0..=n / 2 {
+        let kr = (k * 2) % n;
+        let ki = (n - k * 2 + 1) % n;
+        let zr = re[kr] + re[ki];
+        let zi = im[kr] - im[ki];
+        let er = 0.5 * zr;
+        let ei = -0.5 * zi;
+        out[k] = (er * er + ei * ei).sqrt();
     }
     out
 }
 
-/// Пик автокорреляции + проверка на октаву: если на lag/2 корреляция почти
-/// такая же, истинный период вдвое короче. Именно это даёт женские 220 Гц,
-/// которые читаются как 110 Гц.
-fn autocorr_octave(frame: &[f32], sr: u32, tol: f32) -> Vec<f64> {
-    let min_lag = (sr as f64 / MAX_F) as usize;
-    let max_lag = ((sr as f64 / MIN_F) as usize).min(frame.len() / 2);
-    let energy: f32 = frame.iter().map(|x| x * x).sum();
-    if energy < 1e-6 || max_lag <= min_lag {
-        return Vec::new();
-    }
-    let mut corr = vec![0.0f32; max_lag + 1];
-    let mut best = 0.0f32;
-    let mut best_lag = min_lag;
-    for lag in min_lag..=max_lag {
-        let mut c = 0.0f32;
-        for i in 0..(frame.len() - lag) {
-            c += frame[i] * frame[i + lag];
+fn fft_inplace(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
         }
-        let lag_energy: f32 = frame[lag..].iter().map(|x| x * x).sum();
-        let denom = (energy * lag_energy).sqrt();
-        if denom > 1e-8 {
-            c /= denom;
-        }
-        corr[lag] = c;
-        if c > best {
-            best = c;
-            best_lag = lag;
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
         }
     }
-    if best <= 0.3 {
-        return Vec::new();
-    }
-    let mut lag = best_lag;
-    while lag / 2 >= min_lag {
-        let half = lag / 2;
-        let is_peak = corr[half] >= best * tol
-            && (half == min_lag || corr[half] >= corr[half - 1])
-            && corr[half] >= corr[half + 1];
-        if !is_peak {
-            break;
+    let mut len = 2usize;
+    while len <= n {
+        let ang = -2.0 * std::f64::consts::PI / len as f64;
+        let wr = ang.cos();
+        let wi = ang.sin();
+        let mut i = 0usize;
+        while i < n {
+            let mut cr = 1.0f64;
+            let mut ci = 0.0f64;
+            for k in 0..len / 2 {
+                let ur = re[i + k];
+                let ui = im[i + k];
+                let vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+                let vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                let ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+            i += len;
         }
-        lag = half;
-    }
-    vec![sr as f64 / lag as f64]
-}
-
-/// Медиана по окнам сегмента — так же, как это делает прод.
-fn segment_pitch(
-    samples: &[f32],
-    sr: u32,
-    a: usize,
-    b: usize,
-    f: impl Fn(&[f32], u32) -> Vec<f64>,
-) -> Option<f64> {
-    let mut all = Vec::new();
-    let mut pos = a;
-    while pos + FRAME <= b {
-        all.extend(f(&samples[pos..pos + FRAME], sr));
-        pos += HOP;
-    }
-    median(all)
-}
-
-/// Разностная функция YIN (straightforward, без инкрементальной формулы —
-/// та завязана на другую индексацию окна и даёт мусор).
-fn yin_pitches(frame: &[f32], sr: u32, accept: f32, fallback: f32) -> Vec<f64> {
-    let min_tau = (sr as f64 / MAX_F) as usize;
-    let max_tau = ((sr as f64 / MIN_F) as usize).min(frame.len() / 2);
-    let n = frame.len();
-    if n < max_tau * 2 + 2 || max_tau <= min_tau {
-        return Vec::new();
-    }
-    let mut d = vec![0.0f32; max_tau + 1];
-    for (tau, slot) in d.iter_mut().enumerate().take(max_tau + 1).skip(1) {
-        let mut acc = 0.0f32;
-        for j in 0..(n - tau) {
-            let diff = frame[j] - frame[j + tau];
-            acc += diff * diff;
-        }
-        *slot = acc;
-    }
-    let mut cmnd = vec![1.0f32; max_tau + 1];
-    let mut running = 0.0f32;
-    for tau in 1..=max_tau {
-        running += d[tau];
-        if running > 1e-12 {
-            cmnd[tau] = d[tau] * tau as f32 / running;
-        }
-    }
-    for tau in min_tau..max_tau {
-        if cmnd[tau] < accept && cmnd[tau] < cmnd[tau - 1] && cmnd[tau] < cmnd[tau + 1] {
-            return vec![sr as f64 / tau as f64];
-        }
-    }
-    let mut best = min_tau;
-    for tau in min_tau..=max_tau {
-        if cmnd[tau] < cmnd[best] {
-            best = tau;
-        }
-    }
-    if cmnd[best] < fallback {
-        vec![sr as f64 / best as f64]
-    } else {
-        Vec::new()
+        len <<= 1;
     }
 }
 
@@ -167,20 +184,24 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     if v.is_empty() {
         return None;
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     Some(v[v.len() / 2])
 }
 
-fn segment_span(sr: u32, t0: f64, t1: f64) -> (usize, usize) {
-    ((t0 * sr as f64) as usize, (t1 * sr as f64) as usize)
+fn gender(f0: Option<f64>) -> &'static str {
+    match f0 {
+        Some(hz) if hz >= voice::GENDER_MALE_BELOW_HZ => "F",
+        Some(_) => "M",
+        None => "-",
+    }
 }
 
 fn main() {
-    // Продовский детектор — та же функция, что в пайплайне, а не её копия.
-    let prod = deedub_lib::diarization::estimate_median_pitch;
     let mut args = std::env::args().skip(1);
-    let wav = args.next().unwrap_or_else(|| "temp/deedub_audio.wav".into());
-    let js = args.next().unwrap_or_default();
+    let wav = args
+        .next()
+        .unwrap_or_else(|| "temp/deedub_audio.wav".into());
+    let js = args.next().unwrap_or_else(|| "temp/mel20.json".into());
 
     let (samples, sr) = match load_wav(&wav) {
         Some(v) => v,
@@ -190,9 +211,14 @@ fn main() {
         }
     };
     println!("аудио {wav}: {} сэмплов @ {sr} Гц", samples.len());
+    println!(
+        "пороги продового детектора: ФВЧ {:.0} Гц, гейт p{:.0}, приёмка {:.2}\n",
+        voice::HP_CUTOFF_HZ,
+        voice::VOICING_ENERGY_PERCENTILE,
+        voice::YIN_ACCEPT
+    );
 
-    // Сегменты движка: считаем F0 по каждому окну внутри сегмента.
-    let raw = std::fs::read_to_string(&js).expect("читать json");
+    let raw = std::fs::read_to_string(&js).expect("читать json диаризации");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("парсить json");
     let empty = vec![];
     let segs = parsed
@@ -200,114 +226,83 @@ fn main() {
         .and_then(|v| v.as_array())
         .unwrap_or(&empty);
 
-    struct Acc {
-        ac: Vec<f64>,
-        oct: Vec<f64>,
-        yin: Vec<f64>,
-        windows: usize,
-    }
-    let mut per: HashMap<String, Acc> = HashMap::new();
-    let mut total_windows = 0usize;
+    let mut per: HashMap<String, (Vec<f64>, Vec<f64>, usize, usize)> = HashMap::new();
+    let mut agree = 0usize;
+    let mut compared = 0usize;
 
     for s in segs {
-        let spk = s.get("speaker").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let spk = s
+            .get("speaker")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
         let off = match s.get("offsets") {
             Some(o) => o,
             None => continue,
         };
         let t0 = off.get("from").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 1000.0;
         let t1 = off.get("to").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 1000.0;
-        let (a, b) = segment_span(sr, t0, t1);
-        if b <= a + FRAME || b > samples.len() {
+        let a = (t0 * sr as f64) as usize;
+        let b = ((t1 * sr as f64) as usize).min(samples.len());
+        if a >= b {
             continue;
         }
-        let acc = per.entry(spk).or_insert(Acc {
-            ac: Vec::new(),
-            oct: Vec::new(),
-            yin: Vec::new(),
-            windows: 0,
-        });
-        let mut pos = a;
-        while pos + FRAME <= b {
-            let fr = &samples[pos..pos + FRAME];
-            acc.windows += 1;
-            total_windows += 1;
-            let ac = autocorr_pitches(fr, sr);
-            // медиана окна = текущее продовое поведение
-            if let Some(m) = median(ac.clone()) {
-                acc.ac.push(m);
+        let track = voice::voice_track(&samples[a..b], sr);
+        let truth = harmonic_pitch(&samples[a..b], sr);
+        let acc = per
+            .entry(spk.clone())
+            .or_insert_with(|| (Vec::new(), Vec::new(), 0, 0));
+        acc.3 += 1;
+        if let Some(f) = track.f0_median {
+            acc.0.push(f);
+        }
+        if let Some(f) = truth {
+            acc.1.push(f);
+            acc.2 += 1;
+        }
+        if let (Some(p), Some(t)) = (track.f0_median, truth) {
+            compared += 1;
+            if gender(Some(p)) == gender(Some(t)) {
+                agree += 1;
+            } else {
+                println!(
+                    "  расхождение {spk} {t0:.1}-{t1:.1}с: прод {:.0} ({}) против \
+                     эталона по гармоникам {:.0} ({})",
+                    p,
+                    gender(Some(p)),
+                    t,
+                    gender(Some(t))
+                );
             }
-            acc.oct.extend(autocorr_octave(fr, sr, 0.85));
-            acc.yin.extend(yin_pitches(fr, sr, 0.15, 0.6));
-            pos += HOP;
         }
     }
 
-    println!("всего окон: {total_windows}\n");
     println!(
-        "{:<12}{:>7}{:>10}{:>10}{:>10}   {}",
-        "спикер", "окон", "покр. ac", "покр. oct", "покр. yin", "медианы ac / oct / yin (Гц → пол)"
+        "\n{:<12}{:>8}{:>12}{:>12}   {}",
+        "спикер", "сегм.", "прод Гц", "эталон Гц", "пол прод/эталон"
     );
-    for (spk, acc) in &per {
-        let n = acc.windows.max(1);
-        let (m_ac, m_oct, m_yin) = (
-            median(acc.ac.clone()),
-            median(acc.oct.clone()),
-            median(acc.yin.clone()),
-        );
-        let fmt = |m: Option<f64>| match m {
-            Some(v) => format!("{:.0}{}", v, if v < GENDER_HZ { "M" } else { "F" }),
-            None => "-".to_string(),
-        };
+    for (spk, (prod, truth, with_truth, total)) in &per {
+        let mp = median(prod.clone());
+        let mt = median(truth.clone());
         println!(
-            "{:<12}{:>7}{:>9.0}%{:>9.0}%{:>9.0}%   {} / {} / {}",
+            "{:<12}{:>8}{:>12}{:>12}   {} / {}",
             spk,
-            acc.windows,
-            acc.ac.len() as f64 / n as f64 * 100.0,
-            acc.oct.len() as f64 / n as f64 * 100.0,
-            acc.yin.len() as f64 / n as f64 * 100.0,
-            fmt(m_ac),
-            fmt(m_oct),
-            fmt(m_yin),
+            total,
+            mp.map(|v| format!("{:.0}", v)).unwrap_or("-".into()),
+            mt.map(|v| format!("{:.0}", v)).unwrap_or("-".into()),
+            gender(mp),
+            gender(mt),
         );
+        let _ = with_truth;
     }
-
-    // --- Сверка прода с эталонной октавной поправкой ---
-    // СЕЙЧАС это справочная таблица, а не проверка: в проде октавной поправки
-    // нет (она чинит Melanie и ломает cecelia — см. комментарий в
-    // `estimate_median_pitch`). Столбец `oct` показывает, сколько спикеров
-    // изменило бы пол при её включении, чтобы решение принимали по числам.
-    println!("\n=== справочно: что изменила бы октавная поправка ===");
-    let mut changed = 0usize;
-    let mut checked = 0usize;
-    for s in segs {
-        let spk = s.get("speaker").and_then(|v| v.as_str()).unwrap_or("?");
-        let off = match s.get("offsets") {
-            Some(o) => o,
-            None => continue,
-        };
-        let t0 = off.get("from").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 1000.0;
-        let t1 = off.get("to").and_then(|v| v.as_i64()).unwrap_or(0) as f64 / 1000.0;
-        let (a, b) = segment_span(sr, t0, t1);
-        if b <= a + FRAME || b > samples.len() || b - a > 20 * sr as usize {
-            continue;
+    println!(
+        "\nсегментов с эталоном: {}, пол совпал у {} ({:.0}%)",
+        compared,
+        agree,
+        if compared == 0 {
+            0.0
+        } else {
+            100.0 * agree as f64 / compared as f64
         }
-        let expected =
-            segment_pitch(&samples, sr, a, b, |fr, s| autocorr_octave(fr, s, 0.85));
-        let got = prod(&samples[a..b], sr);
-        if let (Some(e), Some(g)) = (expected, got) {
-            checked += 1;
-            if (e < GENDER_HZ) != (g < GENDER_HZ) {
-                changed += 1;
-                if changed <= 5 {
-                    println!(
-                        "  {spk} {t0:.1}-{t1:.1}s: прод {g:.0} ({}) против поправки {e:.0} ({})",
-                        if g < GENDER_HZ { "M" } else { "F" },
-                        if e < GENDER_HZ { "M" } else { "F" }
-                    );
-                }
-            }
-        }
-    }
-    println!("сегментов сверено: {checked}, пол изменился бы у: {changed}");
+    );
 }

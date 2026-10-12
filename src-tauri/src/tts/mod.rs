@@ -11,14 +11,32 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 // --- Референсы голосового клона ---
 
 /// Выбирает сегмент спикера для клонирования голоса.
-/// Приоритет: длительность в диапазоне [3, 10] с ближайшей к 7 с;
-/// иначе — самый длинный сегмент, но не короче `MIN_CLONE_REF_SEC`.
 ///
-/// Порог берётся из `comm`, а не литерал: `diarization` отбрасывает по нему же
-/// спикеров без пригодного референса, поэтому сегмент короче порога сюда
-/// попасть уже не может. Локальная копия порога означала бы, что два
-/// независимых решения о «годности» голоса разъедутся при правке одного.
-fn pick_ref_segment(speaker: &str, segments: &[SpeakerSegment]) -> Option<(f64, f64)> {
+/// Критерий — **непрерывность вокализованной речи**, а не длительность.
+/// Обоснование то же, что у [`MIN_CLONE_REF_SEC`]: CosyVoice3 строит тембровый
+/// эмбеддинг по ОДНОМУ непрерывному отрезку исходного WAV, и отрезок, где
+/// речь занимает меньшую часть, даёт неустойчивый голос. Правило «ближе к 7 с»
+/// длительность учитывало, а наполнение — нет: на тестовом ролике оно выбрало
+/// для спикера окно `1169.07–1166.91` с 8 % вокализованных кадров, тогда как у
+/// этого же спикера были окна с 24 %.
+///
+/// Второй критерий — близость к 7 с: он не влияет на выбор, когда измерения
+/// различаются, и остаётся единственным, когда тон измерить не удалось
+/// (`voiced_ratio` у всех кандидатов нулевая) — тогда поведение совпадает со
+/// старым, а не становится хуже.
+///
+/// Фоллбэк — самый длинный сегмент не короче [`MIN_CLONE_REF_SEC`]: если
+/// ни один сегмент не попал в диапазон длительности, клон всё равно должен
+/// быть, иначе спикер выпадает из озвучки целиком.
+///
+/// Тон и непрерывность меряются общим модулем `comm::voice` — тем же, что
+/// определяет пол в диаризации.
+fn pick_ref_segment(
+    speaker: &str,
+    segments: &[SpeakerSegment],
+    samples: &[i16],
+    sample_rate: u32,
+) -> Option<(f64, f64)> {
     let mine: Vec<&SpeakerSegment> = segments
         .iter()
         .filter(|s| s.speaker_id == speaker)
@@ -27,18 +45,36 @@ fn pick_ref_segment(speaker: &str, segments: &[SpeakerSegment]) -> Option<(f64, 
         return None;
     }
 
-    let mut best: Option<(f64, f64, f64)> = None;
+    // Окно длительности, в котором эмбеддинг голоса устойчив.
+    const REF_WINDOW_SEC: (f64, f64) = (3.0, 10.0);
+    /// Предпочтительная середина окна: нужна как вторичный критерий.
+    const REF_WINDOW_MID_SEC: f64 = 7.0;
+
+    let mut best: Option<(f64, f64, f64, f64)> = None; // (voiced, |dur-mid|, start, end)
     for s in &mine {
         let d = s.end_sec - s.start_sec;
-        if (3.0..=10.0).contains(&d) {
-            let diff = (d - 7.0).abs();
-            if best.map_or(true, |b| diff < b.2) {
-                best = Some((s.start_sec, s.end_sec, diff));
+        if !(REF_WINDOW_SEC.0..=REF_WINDOW_SEC.1).contains(&d) {
+            continue;
+        }
+        let voiced = match sample_rate {
+            0 => 0.0,
+            sr => {
+                let t =
+                    crate::comm::voice::voice_track_window_i16(samples, sr, s.start_sec, s.end_sec);
+                t.voiced_ratio
             }
+        };
+        let mid_diff = (d - REF_WINDOW_MID_SEC).abs();
+        let better = match best {
+            None => true,
+            Some((bv, bd, _, _)) => voiced > bv || (voiced == bv && mid_diff < bd),
+        };
+        if better {
+            best = Some((voiced, mid_diff, s.start_sec, s.end_sec));
         }
     }
-    if let Some(b) = best {
-        return Some((b.0, b.1));
+    if let Some((_, _, start, end)) = best {
+        return Some((start, end));
     }
 
     let longest = mine
@@ -733,16 +769,17 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
             Some(v) => v.clone(),
             None => {
                 // Создаём клон-референс по голосу спикера (16кГц → 24кГц для --voice).
-                let seg = pick_ref_segment(speaker_id, speaker_segments).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "TTS: нет референсного сегмента для {speaker_id} — у него нет \
-                         реплики длиннее {}с, а короче клон голоса неустойчив. Диаризация \
-                         обычно присоединяет таких спикеров к соседям (см. \
-                         diarization::merge_unclonable_speakers); если спикер единственный, \
-                         значит вся речь в файле короче этого порога.",
-                        MIN_CLONE_REF_SEC
-                    )
-                })?;
+                let seg = pick_ref_segment(speaker_id, speaker_segments, &src_samples, src_sr)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "TTS: нет референсного сегмента для {speaker_id} — у него нет \
+                             реплики длиннее {}с, а короче клон голоса неустойчив. Диаризация \
+                             обычно присоединяет таких спикеров к соседям (см. \
+                             diarization::merge_unclonable_speakers); если спикер единственный, \
+                             значит вся речь в файле короче этого порога.",
+                            MIN_CLONE_REF_SEC
+                        )
+                    })?;
                 let start = (seg.0 * src_sr as f64) as usize;
                 let end = ((seg.1 * src_sr as f64) as usize).min(src_samples.len());
                 if start >= end {
@@ -764,12 +801,26 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
                     &ffmpeg_path,
                 )?;
 
+                // Тон и непрерывность выбранного окна — в лог: по ним видно, почему
+                // клон получился таким, а не «как повезло».
+                let ref_track = crate::comm::voice::voice_track_window_i16(
+                    &src_samples,
+                    src_sr,
+                    seg.0,
+                    seg.1,
+                );
                 log::info!(
-                    "TTS: спикер {} → голос {} (референс {:.1}–{:.1}с, {} чанков)",
+                    "TTS: спикер {} → голос {} (референс {:.1}–{:.1}с, вокализация {:.0}%, \
+                     тон {} Гц, {} чанков)",
                     speaker_id,
                     ref24.display(),
                     seg.0,
                     seg.1,
+                    ref_track.voiced_ratio * 100.0,
+                    ref_track
+                        .f0_median
+                        .map(|h| format!("{:.0}", h))
+                        .unwrap_or_else(|| "не измерен".to_string()),
                     speaker_chunks[speaker_id].len()
                 );
                 voice_map.insert(speaker_id.to_string(), ref24.clone());

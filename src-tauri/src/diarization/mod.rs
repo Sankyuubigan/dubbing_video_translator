@@ -14,133 +14,25 @@ fn load_wav_spec(path: &str) -> Result<(Vec<f32>, u32)> {
         .collect();
     Ok((samples, spec.sample_rate))
 }
-/// Определение основного тона (F0) через автокорреляцию.
-/// Возвращает медианную частоту в Гц или None, если речь не обнаружена.
-///
-/// Известное ограничение, которое НЕ починено: берётся глобальный максимум
-/// автокорреляции, а её пики стоят и на периоде T, и на 2T. На сильной второй
-/// гармонике максимум уезжает на 2T, и женский голос читается вдвое ниже
-/// (измерено: вместо ~235 Гц детектор даёт ~102). Попытки починить это
-/// проверкой «пик на lag/2 такого же уровня» и вариантом «пик на lag/2 выше
-/// соседей» дали обратный брак: на cecelia мужские голоса 105/113 Гц
-/// превращались в 254/200 Гц и все спикеры становились «женщинами». То есть
-/// простая эвристика по уровню корреляции либо не ловит настоящую октавную
-/// ошибку, либо создаёт ложную. Нужен метод с разрешением по форме пика, а не
-/// по его высоте; на синтетических синусах это не отличить — там пик всегда
-/// чистый.
-///
-/// `pub` — зовёт тест-бинарник `test-pitch-live`, который меряет детектор на
-/// живых записях. Приватной оставалась бы, и тогда единственной проверкой
-/// была бы «посмотреть на видео глазами».
-pub fn estimate_median_pitch(samples: &[f32], sample_rate: u32) -> Option<f64> {
-    let min_freq = 70.0;
-    let max_freq = 450.0;
-    let min_lag = (sample_rate as f64 / max_freq) as usize;
-    let max_lag = (sample_rate as f64 / min_freq) as usize;
-    let frame_size = 4096;
-    let hop_size = 1024;
-    let hi_lag = max_lag.min(frame_size / 2);
-    let mut pitches: Vec<f64> = Vec::new();
-    let mut pos = 0;
-    while pos + frame_size <= samples.len() {
-        let raw_frame = &samples[pos..pos + frame_size];
-        let mean: f32 = raw_frame.iter().sum::<f32>() / frame_size as f32;
-        let mut frame = vec![0.0f32; frame_size];
-        let mut energy: f32 = 0.0;
-        for (i, &x) in raw_frame.iter().enumerate() {
-            let hann =
-                0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (frame_size - 1) as f64).cos())
-                    as f32;
-            let val = (x - mean) * hann;
-            frame[i] = val;
-            energy += val * val;
-        }
-        if energy < 1e-5 {
-            pos += hop_size;
-            continue;
-        }
-
-        // YIN difference function d(tau) = sum (x[j] - x[j+tau])^2
-        let mut d = vec![0.0f32; hi_lag + 1];
-        for tau in 1..=hi_lag {
-            let mut acc = 0.0f32;
-            for j in 0..(frame_size - tau) {
-                let diff = frame[j] - frame[j + tau];
-                acc += diff * diff;
-            }
-            d[tau] = acc;
-        }
-
-        // Cumulative mean normalized difference d'(tau)
-        let mut cmnd = vec![1.0f32; hi_lag + 1];
-        let mut running = 0.0f32;
-        for tau in 1..=hi_lag {
-            running += d[tau];
-            if running > 1e-12 {
-                cmnd[tau] = d[tau] * tau as f32 / running;
-            }
-        }
-
-        // Pick first local minimum below threshold 0.15, or global minimum if < 0.6
-        let mut period_opt = None;
-        let yin_accept = 0.15;
-        for tau in min_lag..=hi_lag {
-            if cmnd[tau] < yin_accept
-                && cmnd[tau] < cmnd[tau - 1]
-                && (tau == hi_lag || cmnd[tau] <= cmnd[tau + 1])
-            {
-                period_opt = Some(tau);
-                break;
-            }
-        }
-        if period_opt.is_none() {
-            let mut best = min_lag;
-            for tau in min_lag..=hi_lag {
-                if cmnd[tau] < cmnd[best] {
-                    best = tau;
-                }
-            }
-            if cmnd[best] < 0.6 {
-                period_opt = Some(best);
-            }
-        }
-
-        if let Some(period) = period_opt {
-            pitches.push(sample_rate as f64 / period as f64);
-        }
-        pos += hop_size;
-    }
-    if pitches.is_empty() {
-        return None;
-    }
-    pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    Some(pitches[pitches.len() / 2])
-}
 /// Определяет пол для каждого уникального спикера на основе высоты тона.
-/// Порог: < 160 Гц → male, >= 160 Гц → female.
-/// Сколько ОЦЕНОК тона набираем на спикера для медианы.
 ///
-/// Считается по числу полученных оценок, а не по числу взятых сегментов:
-/// сегмент, где тон не определился, не должен расходовать место в выборке.
-/// Медиана по нескольким точкам устойчива к единичным октавным сбоям.
+/// Тон меряется общим модулем `comm::voice`, а не кодом здесь: пороги среза,
+/// гейта и приёмки подобраны абляцией на фикстурах (`test/fixtures/gender/`)
+/// и обязаны быть одними и теми же у определения пола и у выбора
+/// клон-референса в TTS. Копия этого кода в двух местах разъехалась бы при
+/// первой же правке порога — ровно так и вышло: старый локальный эстиматор
+/// без ФВЧ и без гейта читал голос Мелоди (208 Гц по гармоникам) как 130 Гц
+/// и помечал всех спикеров мужскими.
 ///
-/// Не гоняем детектор по всем сегментам ролика: это десятки секунд CPU в один
-/// поток уже после того, как движок освободил видеопамять.
-const PITCH_ESTIMATES_PER_SPEAKER: usize = 5;
-
-/// Порог пола по основному тону: ниже — male, выше — female.
-///
-/// Вынесен в константу, потому что участвует в решении сразу в двух местах
-/// (детектор и тест-бинарник) и должно быть одно на оба, а не «одинаковое
-/// число в двух местах».
-pub const GENDER_PITCH_THRESHOLD_HZ: f64 = 160.0;
-
-/// Определяет пол для каждого уникального спикера на основе высоты тона.
-/// Порог: < 160 Гц → male, >= 160 Гц → female.
+/// Медиана считается по **всем** кадрам всех реплик спикера. Раньше брались
+/// пять самых длинных реплик, а длина не имеет отношения к тону: на тестовом
+/// ролике это давало 140 Гц вместо 229, то есть «мужской» пол вместо
+/// «женского» на одной и той же записи и одном и том же детекторе.
 fn detect_speaker_genders(
     wav_path: &str,
     speaker_segments: &[SpeakerSegment],
 ) -> HashMap<String, String> {
+    use crate::comm::voice;
     let (samples, sample_rate) = match load_wav_spec(wav_path) {
         Ok(v) => v,
         Err(e) => {
@@ -148,7 +40,7 @@ fn detect_speaker_genders(
             return HashMap::new();
         }
     };
-    // Спикер → окна [start, end) в сэмплах, отсортированные по убыванию длины.
+    // Спикер → окна [start, end) в сэмплах.
     let mut by_speaker: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for seg in speaker_segments {
         let start = (seg.start_sec * sample_rate as f64) as usize;
@@ -162,42 +54,55 @@ fn detect_speaker_genders(
             .push((start, end));
     }
     let mut result = HashMap::new();
-    for (speaker_id, mut windows) in by_speaker {
-        windows.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)));
+    for (speaker_id, windows) in by_speaker {
         let mut pitches: Vec<f64> = Vec::new();
+        let mut used = 0usize;
         // Считаем до нужного ЧИСЛА ОЦЕНОК, а не до числа сегментов.
-        // Раньше брались ровно три самых длинных сегмента, и если хоть один
-        // из них не дал тона (короткий, шумный, с тишиной), медиана считалась
-        // по одной-двум точкам — а это ровно тот случай, когда результат
-        // переворачивается. Теперь короткий сегмент просто не занимает места
-        // в выборке, и мы идём дальше по списку.
+        // Сегмент, где тон не определился, просто не занимает места в
+        // выборке, и мы идём дальше по списку.
         for (start, end) in windows.iter() {
-            if pitches.len() >= PITCH_ESTIMATES_PER_SPEAKER {
-                break;
-            }
             if crate::is_cancelled() {
                 log::info!("GenderDetection: прервано пользователем");
                 return HashMap::new();
             }
-            if let Some(pitch) = estimate_median_pitch(&samples[*start..*end], sample_rate) {
-                pitches.push(pitch);
+            let track = voice::voice_track(&samples[*start..*end], sample_rate);
+            if track.pitches.is_empty() {
+                continue;
             }
+            pitches.extend_from_slice(&track.pitches);
+            used += 1;
         }
         if pitches.is_empty() {
+            log::warn!(
+                "GenderDetection: {} — тон не измерен ни в одном сегменте, пол неизвестен \
+                 (в промпте будет [Person], окончания не задаются)",
+                speaker_id
+            );
             continue;
         }
-        pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = pitches[pitches.len() / 2];
-        let gender = if median < GENDER_PITCH_THRESHOLD_HZ { "male" } else { "female" };
-        log::info!(
-            "GenderDetection: {} median pitch={:.0} Hz → {} ({} сегм. из {})",
-            speaker_id,
-            median,
-            gender,
-            pitches.len(),
-            windows.len()
-        );
-        result.insert(speaker_id, gender.to_string());
+        let total_frames = pitches.len();
+        let median = voice::median_pitch(&mut pitches).unwrap_or(0.0);
+        match voice::gender_of(Some(median)) {
+            Some(g) => {
+                log::info!(
+                    "GenderDetection: {} median pitch={:.0} Hz → {} ({} репл. из {}, {} кадров)",
+                    speaker_id,
+                    median,
+                    g,
+                    used,
+                    windows.len(),
+                    total_frames
+                );
+                result.insert(speaker_id, g.to_string());
+            }
+            None => {
+                log::warn!(
+                    "GenderDetection: {} — пол не определён по тону {:.0} Hz",
+                    speaker_id,
+                    median
+                );
+            }
+        }
     }
     result
 }
@@ -415,9 +320,36 @@ if speaker_segments.is_empty() {
     crate::comm::merge_unclonable_speakers(&mut speaker_segments, &mut subtitle_chunks);
     Some((speaker_segments, subtitle_chunks))
 }
-/// Один прогон CrispASR: parakeet ASR + VAD + диаризация с авто-оценкой
-/// числа спикеров (`--diarize-speakers`, сессионная кластеризация TitaNet).
+/// Один прогон CrispASR: parakeet ASR + VAD + end-to-end диаризация sortformer.
 /// Возвращает None, если движок недоступен/не дал сегментов.
+///
+/// **Почему sortformer, а не сессионная кластеризация TitaNet.** Раньше здесь
+/// стояло `--diarize-speakers --diarize-embedder auto`: движок резал речь на
+/// локальные трёки (pyannote), а глобальные номера спикеров собирал отдельной
+/// кластеризацией эмбеддингов TitaNet-Large. На тестовом ролике (двое
+/// говорящих) она выдавала ТРИ кластера и, главное, **сливала женский голос с
+/// мужским в один**: сегменты 14.7–21.8 с и 22.1–55.2 с несли `speaker 2` при
+/// разговоре «ведущий → Мелоди → ведущий». Дальше цепочка исправна, но
+/// `tts::pick_ref_segment` берёт самый вокализированный сегмент кластера
+/// (мужские ~125 Гц), и женские реплики этого кластера озвучиваются мужским
+/// референсом — «мужик озвучивает бабу». Замер: `Speaker_1 F->M=12`.
+/// Подбор `--diarize-cluster-threshold` лечил бы симптом под один ролик
+/// (core §1.12), а класс отказа остался бы.
+///
+/// sortformer (NVIDIA Nemotron-3-Diarization) решает задачу целиком и за один
+/// глобальный проход: до 8 спикеров в порядке появления, 10 мс разрешение.
+/// Число спикеров остаётся автоматическим — харкода нет. На том же ролике:
+/// 2 кластера (как в видео), 224 сегмента против 129, 12.7 с против 31.1 с.
+///
+/// JSON на выходе у обоих методов одинаков по форме (`offsets`, `speaker`,
+/// `text`, `words[].offsets`), поэтому парсер выше не менялся.
+///
+/// Флаг `--diarize-speakers` здесь НЕ оставлен: в `--help` движка он описан как
+/// алиас «pyannote + сессионная кластеризация», то есть называет другой
+/// алгоритм. Проверено прогоном, что под `--diarize-method sortformer` он
+/// инертен и разметку не меняет — так что оставить его можно было бы, но
+/// явный `--diarize` читается однозначно (см. tasks\12.10.26 Диаризация
+/// sortformer вместо TitaNet.md, гейт Б).
 fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<SubtitleChunk>)> {
     if crate::is_cancelled() {
         log::info!("Diarization: отменено пользователем");
@@ -441,7 +373,8 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
     let json_path = prefix.with_extension("json");
     let stderr_log = prefix.with_extension("log");
     log::info!(
-        "Diarization: [CrispASR] запускаем parakeet + диаризацию (--diarize-speakers, авто-число спикеров)..."
+        "Diarization: [CrispASR] запускаем parakeet + диаризацию sortformer \
+         (end-to-end, авто-число спикеров до 8)..."
     );
     let stderr_file = match std::fs::File::create(&stderr_log) {
         Ok(f) => f,
@@ -458,9 +391,9 @@ fn try_engine_diarization(wav_path: &str) -> Option<(Vec<SpeakerSegment>, Vec<Su
         .arg(&model)
         .arg("-f")
         .arg(wav_path)
-        .arg("--diarize-speakers")
-        .arg("--diarize-embedder")
-        .arg("auto")
+        .arg("--diarize")
+        .arg("--diarize-method")
+        .arg("sortformer")
         .arg("--auto-download")
         .arg("--verbose")
         .arg("-ojf")

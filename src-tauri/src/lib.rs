@@ -11,6 +11,7 @@ mod stt;
 mod translation;
 pub mod tts;
 mod verification;
+pub mod voice;
 
 use comm::{PipelineConfig, PipelineContext, ProgressUpdate, SubtitleChunk};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
