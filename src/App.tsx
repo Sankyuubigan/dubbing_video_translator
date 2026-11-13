@@ -2,17 +2,14 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import {
-  getEngineConfig,
-  MODELS_CHANGED_EVENT,
-  type EngineConfig,
-} from "@my-tauri-plugins/plugin-llama-engine";
+import { MODELS_CHANGED_EVENT } from "@my-tauri-plugins/plugin-llama-engine";
 import "@my-tauri-plugins/plugin-logs";
 import "./App.css";
 import Settings from "./Settings";
+import Live from "./Live";
 
 type Stage = "idle" | "select" | "processing" | "done" | "error";
-type Tab = "main" | "logs" | "settings";
+type Tab = "main" | "live" | "logs" | "settings";
 
 /** Формат промпта перевода. `auto` определяет его по модели (см. PromptStyle в Rust). */
 type PromptStyle = "auto" | "insttrans" | "chat";
@@ -33,7 +30,7 @@ interface ProgressUpdate {
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("main");
   const [videoPath, setVideoPath] = useState<string>("");
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null);
+  const [translationModel, setTranslationModel] = useState<string>("");
   const [ffmpegPath, setFfmpegPath] = useState<string>("");
   const [format, setFormat] = useState<string>("mp4");
   const [enableDubbing, setEnableDubbing] = useState<boolean>(false);
@@ -46,17 +43,18 @@ export default function App() {
   const [resultPath, setResultPath] = useState("");
   const [error, setError] = useState("");
 
-  const modelPath = engineCfg?.last_model || "";
+  // Активная модель перевода: приходит из нашего config.toml (get_config),
+  // меняется через set_translation_model в handleSelectModel.
+  const modelPath = translationModel;
 
-  const refreshEngineConfig = useCallback(async () => {
+  const refreshModels = useCallback(async () => {
     try {
-      setEngineCfg(await getEngineConfig());
       // Список для селекта берём своей командой: она отдаёт только пути и
-      // признак «файл на месте», а `getEngineConfig` тащит за собой ещё и
-      // параметры сэмплирования, которые селекту не нужны.
+      // признак «файл на месте», без параметров сэмплирования. Активная
+      // модель живёт в нашем config.toml и приходит через get_config.
       setModels(await invoke<ModelChoice[]>("list_translation_models"));
     } catch (e) {
-      console.error("Не удалось прочитать конфиг движка LLM", e);
+      console.error("Не удалось прочитать список моделей перевода", e);
     }
   }, []);
 
@@ -92,14 +90,14 @@ export default function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
-  // Активная модель живёт в конфиге плагина движка: читаем его на старте и
-  // обновляемся, когда модель меняется в Настройках (core §2.1, SSOT).
+  // Каталог моделей читаем на старте и обновляем, когда панель в Настройках
+  // меняет реестр (добавили/удалили модель).
   useEffect(() => {
-    void refreshEngineConfig();
-    const onChanged = () => { void refreshEngineConfig(); };
+    void refreshModels();
+    const onChanged = () => { void refreshModels(); };
     document.addEventListener(MODELS_CHANGED_EVENT, onChanged);
     return () => document.removeEventListener(MODELS_CHANGED_EVENT, onChanged);
-  }, [refreshEngineConfig]);
+  }, [refreshModels]);
 
   useEffect(() => {
     invoke<{
@@ -108,12 +106,14 @@ export default function App() {
       enable_dubbing: boolean;
       mix_volume: number;
       prompt_style: PromptStyle;
+      translation_model: string | null;
     }>("get_config")
       .then((cfg) => {
         if (cfg.ffmpeg_path) setFfmpegPath(cfg.ffmpeg_path);
         if (cfg.output_format) setFormat(cfg.output_format);
         setEnableDubbing(cfg.enable_dubbing);
         setMixVolume(Math.round(cfg.mix_volume * 100));
+        setTranslationModel(cfg.translation_model || "");
         // Значение из старой копии config.toml может быть любым мусором —
         // тогда оставляем auto, а не пишем мусор обратно в конфиг.
         if (["auto", "insttrans", "chat"].includes(cfg.prompt_style)) {
@@ -136,18 +136,20 @@ export default function App() {
           enable_dubbing: enableDubbing,
           mix_volume: mixVolume / 100,
           prompt_style: promptStyle,
+          translation_model: translationModel || null,
         },
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
-  }, [ffmpegPath, format, enableDubbing, mixVolume, promptStyle]);
+  }, [ffmpegPath, format, enableDubbing, mixVolume, promptStyle, translationModel]);
 
   const handleSelectModel = async (path: string) => {
     if (!path) return;
     try {
       await invoke("set_translation_model", { path });
-      // Событие нужно, чтобы обновились и наш индикатор, и `●` у активной
-      // модели в панели плагина — это публичный контракт плагина, а не костыль.
+      // Выбор теперь наш (config.toml → get_config); событие обновляет
+      // каталог моделей в панели Настроек.
+      setTranslationModel(path);
       document.dispatchEvent(new CustomEvent(MODELS_CHANGED_EVENT));
     } catch (e) {
       setError(`Не удалось выбрать модель: ${e}`);
@@ -197,6 +199,12 @@ export default function App() {
           onClick={() => setActiveTab("main")}
         >
           Главная
+        </button>
+        <button
+          className={"tab" + (activeTab === "live" ? " tab-active" : "")}
+          onClick={() => setActiveTab("live")}
+        >
+          Live
         </button>
         <button
           className={"tab" + (activeTab === "logs" ? " tab-active" : "")}
@@ -399,6 +407,15 @@ export default function App() {
           )}
         </>
       )}
+
+      {/* Live смонтирован ВСЕГДА: анмаунт на смене вкладки гасил плеер
+          (видео «останавливалось» и потом стартовало с нуля), слушателей
+          live-subs/live-ru/live-dub (пропущенные фразы терялись — сабы
+          исчезали до конца сессии) и очередь дубляжа. Прячем через display,
+          состояние и подписки живут, пока приложение открыто. */}
+      <div style={{ display: activeTab === "live" ? undefined : "none" }}>
+        <Live />
+      </div>
 
       {activeTab === "settings" && (
         <Settings

@@ -52,6 +52,10 @@ path = "src/bin/test_pitch_live.rs"
 name = "test-gender-fixtures"
 path = "src/bin/test_gender_fixtures.rs"
 
+[[bin]]
+name = "test-live-playlist"
+path = "src/bin/test_live_playlist.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 
@@ -69,6 +73,19 @@ tauri-plugin-logs = { path = "../../my-tauri-plugins/tauri-plugin-logs" }
 # llama-server.exe и моделей (desktop §6.7 — LLM только отдельным процессом).
 tauri-plugin-downloader = { path = "../../my-tauri-plugins/tauri-plugin-downloader" }
 tauri-plugin-llama-engine = { path = "../../my-tauri-plugins/tauri-plugin-llama-engine", features = ["host-logs"] }
+# Потоковый ffmpeg-pipe для live-режима (шаг 2 PRP): код пайпа — в плагине,
+# резолв пути к exe остаётся у хоста (crate::ffmpeg::resolve — ССОТ).
+tauri-plugin-ffmpeg = { path = "../../my-tauri-plugins/tauri-plugin-ffmpeg" }
+# Резолвер HLS-ссылок для live-источников «URL» (шаг 5 PRP): yt-dlp.exe,
+# его установка/обновление и прокси — ССОТ плагина (указание юзера).
+# Сам плагин не регистрируется в app — хост зовёт engine::ytdlp_manager напрямую.
+tauri-plugin-ytdlp = { path = "../../my-tauri-plugins/tauri-plugin-ytdlp" }
+# WS-клиент /v1/realtime движка crispasr (live, шаг 2). Версия 0.24 — как в
+# my-tauri-plugins (один бинарь в lockfile). Протокол: JSON-кадры, аудио —
+# base64 s16le (проба 0.8.43: корневой WS плагина мёртв — 404 no matching route).
+tungstenite = "0.24"
+# Base64 для input_audio_buffer.append того же протокола.
+base64 = "0.22"
 
 anyhow = "1.0"
 thiserror = "1.0"
@@ -77,7 +94,15 @@ dirs = "6.0"
 hound = "3.5"
 
 regex = "1.10"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "net", "sync", "fs", "io-util"] }
+
+# Live-режим (time-shift, PRP «11.11.26 Live-режим Twitch.md» v2): HLS-загрузчик
+# (reqwest+socks для опционального прокси) + loopback HTTP-сервер для hls.js
+# (axum на 127.0.0.1:0 — специалист: кастомный URI-протокол в WebView2 глючит
+# на медиа: Range/206, CORS) + парсинг EXT-X-PROGRAM-DATE-TIME (chrono).
+reqwest = { version = "0.12", features = ["json", "socks"] }
+axum = "0.8"
+chrono = "0.4"
 
 [features]
 default = []

@@ -2,10 +2,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Конфиг приложения. Выбор LLM-модели здесь НЕ хранится: он живёт в
-/// конфиге плагина `tauri-plugin-llama-engine` (`app_config.json`, ключ
-/// `last_model`) — единый источник правды (core §2.1). Старый ключ
-/// `gguf_model_path` в файле пользователя просто игнорируется serde.
+/// Конфиг приложения. Выбор LLM-модели хранится ЗДЕСЬ (`translation_model`) —
+/// выбор модели собственность хоста: общий конфиг плагина llama-engine
+/// используется другими проектами, и чужой выбор там затирал наш
+/// (инцидент 13.11.26: KingOrch записал `gateway:...`, MT умер молча).
+/// Старые ключи `gguf_model_path` и оставшийся в общем файле `last_model`
+/// плагина игнорируются serde.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub output_format: String,
@@ -21,6 +23,11 @@ pub struct AppConfig {
     /// ключа привела бы к откату всего конфига на дефолты (см. `load`).
     #[serde(default = "default_prompt_style")]
     pub prompt_style: String,
+    /// Активная модель перевода (путь к GGUF). Селект главной вкладки и
+    /// `llm::resolve_model_path` читают одно и то же место правды. У старых
+    /// config.toml поля нет — это «не выбрана», а не ошибка разбора файла.
+    #[serde(default)]
+    pub translation_model: Option<String>,
 }
 
 fn default_mix_volume() -> f64 { 0.15 }
@@ -39,6 +46,7 @@ impl Default for AppConfig {
             enable_dubbing: false,
             mix_volume: 0.15,
             prompt_style: default_prompt_style(),
+            translation_model: None,
         }
     }
 }

@@ -22,7 +22,9 @@ STRICT RULES:
 
 /// Собирает сообщения для одного чанка: правила + предыдущие пары EN/RU +
 /// lookahead по английскому оригиналу (source-side контекст важнее целевого).
-fn build_messages(
+/// `pub(crate)`: «дверь» для live-режима (live/mt.rs) — тот же промпт, что в
+/// файловом пайплайне, иначе модели в двух режимах живут в разных распределениях.
+pub(crate) fn build_messages(
     current_text: &str,
     prev_chunks: &[(String, String)],
     next_chunks: &[String],
@@ -627,6 +629,7 @@ pub fn translate_with_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::comm::strip_masked_words;
 
     // ---- Цензура: замаскированные слова не доходят ни в SRT, ни в TTS ----
 

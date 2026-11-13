@@ -113,7 +113,9 @@ fn safe_speaker(speaker: &str) -> String {
 // --- Время и длительность WAV ---
 
 /// Длительность WAV из байтов ответа движка (без записи на диск).
-fn wav_sr_and_duration_bytes(bytes: &[u8]) -> Result<(u32, f64)> {
+/// pub(crate): «дверь» для live-режима (live/tts.rs считает длительность WAV
+/// для события live-dub — фронту нужна длительность для skip-логики).
+pub(crate) fn wav_sr_and_duration_bytes(bytes: &[u8]) -> Result<(u32, f64)> {
     let r = hound::WavReader::new(std::io::Cursor::new(bytes))
         .context("TTS: разбор WAV из байтов")?;
     let sr = r.spec().sample_rate;

@@ -4,6 +4,7 @@ pub mod config;
 pub mod diarization;
 mod ffmpeg;
 mod llm;
+pub mod live;
 pub mod output;
 pub mod paths;
 pub mod pipeline;
@@ -301,18 +302,20 @@ fn save_config(state: tauri::State<AppState>, cfg: config::AppConfig) -> Result<
     Ok(())
 }
 
-/// Делает `path` активной моделью перевода и возвращает её в списке моделей.
+/// Делает `path` активной моделью перевода и возвращает путь обратно.
 ///
-/// Пишет в конфиг плагина движка (`app_config.json`, ключ `last_model`) — тот же
-/// файл, откуда модель читается при запуске (`llm::resolve_model_path`), и
-/// поэтому единственный источник правды (core §2.1). Никакой второй
-/// «выбранной модели» в нашем конфиге не появляется специально: иначе два
-/// места правды разъедутся, и UI будет показывать не ту модель, что поедет.
-///
-/// Плагин не меняем: `load_config`/`save_config` у него и так `pub`, хост уже
-/// пользуется ими кросс-кратом.
+/// Выбор модели — собственность хоста: пишем в СВОЙ `~/.deedub/config.toml`
+/// (`translation_model`), который читает `llm::resolve_model_path`, — единый
+/// источник правды (core §2.1). В общий конфиг плагина ничего не пишем:
+/// плагин используется разными проектами, и чужой выбор там затирал наш
+/// (инцидент 13.11.26: KingOrch записал `gateway:...`, MT умер молча).
+/// В каталоге плагина файл по-прежнему регистрируется — реестр моделей общий.
 #[tauri::command]
-fn set_translation_model(app: tauri::AppHandle, path: String) -> Result<String, String> {
+fn set_translation_model(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    path: String,
+) -> Result<String, String> {
     let path = path.trim().to_string();
     if path.is_empty() {
         return Err("Путь к модели перевода не указан".to_string());
@@ -321,27 +324,33 @@ fn set_translation_model(app: tauri::AppHandle, path: String) -> Result<String, 
         return Err(format!("Файл модели не найден: {path}"));
     }
 
-    let mut cfg = tauri_plugin_llama_engine::engine::load_config(&app);
-    if !cfg.models.iter().any(|m| m == &path) {
-        // Файл на диске есть, но в реестре плагина его нет — значит модель
-        // добавлена мимо панели (или панель её уже чистила). Регистрируем здесь
-        // же: иначе выбор из UI нельзя было бы вернуть в реестр, а `remove_model`
-        // при следующем открытии панели решит, что модели не существует.
-        cfg.models.push(path.clone());
+    // Реестр моделей плагина — общий каталог: регистрируем файл, если его там
+    // ещё нет (иначе панель при следующем открытии решит, что модели нет).
+    let mut eng = tauri_plugin_llama_engine::engine::load_config(&app);
+    if !eng.models.iter().any(|m| m == &path) {
+        eng.models.push(path.clone());
+        tauri_plugin_llama_engine::engine::save_config(&app, &eng)
+            .map_err(|e| format!("Не удалось зарегистрировать модель в каталоге: {e}"))?;
     }
-    cfg.last_model = Some(path.clone());
-    tauri_plugin_llama_engine::engine::save_config(&app, &cfg)
-        .map_err(|e| format!("Не удалось сохранить выбор модели: {e}"))?;
+
+    // Выбор — в наш конфиг: перезаписываем и RAM-копию, и файл.
+    let mut cfg = state.config.lock().unwrap().clone();
+    cfg.translation_model = Some(path.clone());
+    config::save(&cfg).map_err(|e| format!("Не удалось сохранить выбор модели: {e}"))?;
+    *state.config.lock().unwrap() = cfg;
     log::info!("LLM: активная модель перевода — {path}");
     Ok(path)
 }
 
-/// Список моделей перевода, доступных для выбора: пути из конфига плагина плюс
-/// отметка активной. Отдельной команды плагина для этого нет — там есть
-/// `get_engine_config`, но он отдаёт ещё и параметры сэмплирования, а здесь нужен
-/// только список для селекта.
+/// Список моделей перевода, доступных для выбора: каталог из конфига плагина
+/// плюс «активная» из нашего config.toml (`translation_model`). Отдельной
+/// команды плагина для этого нет — там есть `get_engine_config`, но он отдаёт
+/// ещё и параметры сэмплирования, а здесь нужен только список для селекта.
 #[tauri::command]
-fn list_translation_models(app: tauri::AppHandle) -> Result<Vec<ModelChoice>, String> {
+fn list_translation_models(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<Vec<ModelChoice>, String> {
     let cfg = tauri_plugin_llama_engine::engine::load_config(&app);
     let mut models: Vec<ModelChoice> = cfg
         .models
@@ -355,7 +364,13 @@ fn list_translation_models(app: tauri::AppHandle) -> Result<Vec<ModelChoice>, St
     // Активная модель может отсутствовать в реестре (например, её добавили
     // до обновления конфига). Без неё селект показал бы «пусто» при реально
     // работающей модели — показываем и её.
-    let active = cfg.last_model.clone().unwrap_or_default();
+    let active = state
+        .config
+        .lock()
+        .unwrap()
+        .translation_model
+        .clone()
+        .unwrap_or_default();
     if !active.is_empty() && !models.iter().any(|m| m.path == active) {
         models.insert(
             0,
@@ -419,6 +434,9 @@ fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_speech::init())
+        // ffmpeg-пайп live-режима: код в плагине, путь к exe резолвит хост
+        // (crate::ffmpeg::resolve — ССОТ, desktop §2).
+        .plugin(tauri_plugin_ffmpeg::init())
         .manage(AppState {
             config: Mutex::new(app_cfg),
         })
@@ -430,6 +448,10 @@ fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
             save_config,
             set_translation_model,
             list_translation_models,
+            live::live_start,
+            live::live_stop,
+            live::live_status,
+            live::live_synth,
         ])
 }
 
@@ -443,6 +465,67 @@ fn init_logging_and_engine_config() {
 /// Имя папки app-data — единый источник для `tauri-plugin-llama-engine`
 /// (совпадает с `identifier` в `tauri.conf.json`).
 const APP_DATA_DIR_NAME: &str = "com.deedub.desktop";
+
+/// Одноразовое усыновление выбора модели из общего конфига плагина. Возвращает
+/// конфиг, которым ДОЛЖЕН инициализироваться AppState: усыновлённое значение
+/// попадает и в память, и на диск. Вызывать ДО `config::load()` для AppState —
+/// иначе AppState родится без модели, get_config вернёт null, и автосейв
+/// фронта (App.tsx, 500 мс после загрузки) затрёт усыновлённый выбор в
+/// config.toml обратно (гонка воспроизведена селфтестом 13.11.26).
+///
+/// До «last_model только в хостах» выбор жил в ключе `last_model` общего файла
+/// `APPDATA/llama-engine/app_config.json`. Ключ из `EngineConfig` удалён —
+/// читаем сырой JSON напрямую. Правила: свой выбор уже есть — ничего не делаем;
+/// там валидный локальный GGUF — переносим в наш config.toml; там не-файл
+/// (например, `gateway:...` — мусор от KingOrch, инцидент 13.11.26) —
+/// игнорируем с логом, чтобы мусор не переехал в наш конфиг.
+fn adopt_legacy_model() -> config::AppConfig {
+    let mut ours = config::load();
+    if ours.translation_model.is_some() {
+        return ours;
+    }
+    let path = tauri_plugin_llama_engine::engine::config::app_data_dir_early()
+        .join("app_config.json");
+    let legacy = std::fs::read_to_string(&path).ok().and_then(|raw| {
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("last_model").and_then(|m| m.as_str()).map(String::from))
+    });
+    let Some(legacy) = legacy.filter(|p| !p.trim().is_empty()) else {
+        return ours;
+    };
+    if !std::path::Path::new(&legacy).is_file() {
+        // НЕ log::warn!: реальный логгер ставится только при старте Tauri,
+        // всё log::* до этого молча теряется (найдено 19:13 прогоном миграции).
+        // Штатный ранний канал — tauri_plugin_logs::early_log (files + stderr).
+        tauri_plugin_logs::early_log(
+            "WARN",
+            &format!(
+                "LLM: в общем конфиге плагина last_model = «{legacy}» — это не локальный файл \
+                 (чужой выбор, инцидент 13.11.26); в наш config.toml НЕ переносим, \
+                 выберите модель в селекте."
+            ),
+        );
+        return ours;
+    }
+    ours.translation_model = Some(legacy.clone());
+    match config::save(&ours) {
+        Ok(()) => tauri_plugin_logs::early_log(
+            "INFO",
+            &format!("LLM: усыновлена модель из общего конфига плагина: {legacy}"),
+        ),
+        Err(e) => {
+            tauri_plugin_logs::early_log(
+                "ERROR",
+                &format!("LLM: не удалось сохранить усыновлённую модель: {e}"),
+            );
+            // На диске выбора нет — но в памяти он есть: AppState инициализируется
+            // этим значением, так что сессия проработает с усыновлённой моделью,
+            // даже если файл не записался.
+        }
+    }
+    ours
+}
 
 fn run_pipeline_blocking(
     handle: tauri::AppHandle,
@@ -516,7 +599,9 @@ fn spawn_pipeline_thread(handle: tauri::AppHandle, video: String, enable_dubbing
 pub fn run() {
     init_logging_and_engine_config();
 
-    let app_cfg = config::load();
+    // Усыновление ДО load: app_cfg в AppState уже с моделью, автосейв фронта
+    // её не затрёт (см. док adopt_legacy_model).
+    let app_cfg = adopt_legacy_model();
 
     base_builder(app_cfg)
         .setup(|app| {
@@ -529,6 +614,123 @@ pub fn run() {
                     log::info!("=== AUTO: starting pipeline with {}", video);
                     spawn_pipeline_thread(app_handle, video, false);
                 }
+            }
+
+            // E2E-селфтест live-режима (шаги 2-5 PRP, env-гейт): поднять
+            // сессию, проработать DURATION секунд, сбросить счётчики в лог и
+            // выйти. SOURCE=twitch|url|file, TARGET=канал|ссылка|файл.
+            if std::env::var("DEEDUB_LIVE_SELFTEST").as_deref() == Ok("1") {
+                let source = std::env::var("DEEDUB_LIVE_SELFTEST_SOURCE")
+                    .unwrap_or_else(|_| "twitch".into());
+                let target = std::env::var("DEEDUB_LIVE_SELFTEST_TARGET").unwrap_or_default();
+                let duration: u64 = std::env::var("DEEDUB_LIVE_SELFTEST_DURATION")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(120);
+                let sh = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    log::info!(
+                        "LIVE-SELFTEST: старт (source={source}, target={target}, duration={duration}s)"
+                    );
+                    let voice = crate::paths::temp_dir().join("live_selftest_voice.wav");
+                    let voice_s = if voice.is_file() {
+                        voice.to_string_lossy().to_string()
+                    } else {
+                        String::new()
+                    };
+                    let res = match source.as_str() {
+                        "file" => {
+                            live::live_start(
+                                sh.clone(),
+                                String::new(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some("file".into()),
+                                None,
+                                Some(target.clone()),
+                                Some(voice_s),
+                                Some(true),
+                            )
+                            .await
+                        }
+                        "url" => {
+                            live::live_start(
+                                sh.clone(),
+                                String::new(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some("url".into()),
+                                Some(target.clone()),
+                                None,
+                                Some(voice_s),
+                                Some(true),
+                            )
+                            .await
+                        }
+                        _ => {
+                            live::live_start(
+                                sh.clone(),
+                                target.clone(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some("twitch".into()),
+                                None,
+                                None,
+                                Some(voice_s),
+                                Some(true),
+                            )
+                            .await
+                        }
+                    };
+                    match res {
+                        Ok(v) => log::info!("LIVE-SELFTEST: сессия поднялась: {v}"),
+                        Err(e) => log::error!("LIVE-SELFTEST: live_start не удался: {e}"),
+                    }
+                    // Проба полного пути озвучки (шаг 4): фронт в селфтесте не
+                    // подключён — зовём live_synth напрямую, как это делает
+                    // фронт за LEAD-секунды до t0. t0/t1 далеко в будущем, у
+                    // события живёт только счётчик DUB_N.
+                    let sh2 = sh.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                        let res = live::live_synth(
+                            999999,
+                            1000.0,
+                            1003.0,
+                            "Проверка озвучки: рейтинг 9.5".into(),
+                        );
+                        match res {
+                            Ok(()) => log::info!("LIVE-SELFTEST: проба озвучки отправлена"),
+                            Err(e) => log::error!("LIVE-SELFTEST: проба озвучки: {e}"),
+                        }
+                        let _ = sh2;
+                    });
+                    tokio::time::sleep(std::time::Duration::from_secs(duration)).await;
+                    let st = live::live_status();
+                    log::info!(
+                        "LIVE-SELFTEST: subs={} ru={} dub={} | stt={} mt={} tts={} | state={} segs={} failed={} err={}",
+                        live::audio::SUBS_N.load(std::sync::atomic::Ordering::SeqCst),
+                        live::mt::RU_N.load(std::sync::atomic::Ordering::SeqCst),
+                        live::tts::DUB_N.load(std::sync::atomic::Ordering::SeqCst),
+                        st.stt_state,
+                        st.mt_state,
+                        st.tts_state,
+                        st.state,
+                        st.segments_downloaded,
+                        st.segments_failed,
+                        st.last_error,
+                    );
+                    let _ = live::live_stop().await;
+                    log::info!("LIVE-SELFTEST: завершение, exit(0)");
+                    std::process::exit(0);
+                });
             }
 
             Ok(())
@@ -549,7 +751,7 @@ pub fn run() {
 pub fn run_headless(video_path: String, enable_dubbing: bool) -> i32 {
     init_logging_and_engine_config();
 
-    let app_cfg = config::load();
+    let app_cfg = adopt_legacy_model();
 
     let app = base_builder(app_cfg)
         .build(tauri::generate_context!())
@@ -596,11 +798,11 @@ pub fn run_headless(video_path: String, enable_dubbing: bool) -> i32 {
 /// спикеров гуляет 4↔5) и сравнение переводов становится бессмысленным.
 ///
 /// Модель выбирается env `DEEDUB_LLM_MODEL` (см. `llm::resolve_model_path`),
-/// иначе берётся из конфига плагина.
+/// иначе — `translation_model` из нашего config.toml.
 pub fn run_mt_ab(video_path: String, json_path: String) -> i32 {
     init_logging_and_engine_config();
 
-    let app_cfg = config::load();
+    let app_cfg = adopt_legacy_model();
     let app = base_builder(app_cfg)
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

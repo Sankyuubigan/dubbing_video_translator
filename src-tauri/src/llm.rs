@@ -75,9 +75,9 @@ fn prompt_tokens_upper_bound(messages: &[LlmMessage]) -> usize {
 }
 
 impl LlmSession {
-    /// Поднимает движок на активной модели (её выбирает пользователь в
-    /// Настройках → «Локальные модели перевода»; выбранная модель хранится
-    /// в конфиге плагина, `last_model`).
+    /// Поднимает движок на активной модели (её выбирает пользователь в селекте
+    /// главной вкладки; выбор хранится в нашем `~/.deedub/config.toml`,
+    /// ключ `translation_model` — собственность хоста, не плагина).
     pub fn open(app: &AppHandle) -> Result<Self, String> {
         let engine_dir = tauri_plugin_llama_engine::get_engine_dir(app);
         if !llamacpp_installer::has_any_installed(&engine_dir) {
@@ -88,7 +88,7 @@ impl LlmSession {
             ));
         }
 
-        let model_path = resolve_model_path(app)?;
+        let model_path = resolve_model_path()?;
         if !Path::new(&model_path).is_file() {
             return Err(format!(
                 "Файл выбранной модели не найден: {}\n\
@@ -242,17 +242,18 @@ pub fn message(role: &str, content: String) -> LlmMessage {
 /// Путь к GGUF модели перевода. Приоритет:
 /// 1. env `DEEDUB_LLM_MODEL` (явный путь — для headless A/B прогонов разных
 ///    моделей без правки пользовательских настроек);
-/// 2. конфиг плагина, `last_model` — то, что выбрано в Настройках →
-///    «Локальные модели перевода» (core §2.1: единственный источник правды
-///    в обычном режиме).
+/// 2. наш `~/.deedub/config.toml`, `translation_model` — то, что выбрано в
+///    селекте главной вкладки (core §2.1: единственный источник правды в
+///    обычном режиме). Общий конфиг плагина НЕ читаем: он общий для проектов,
+///    чужой выбор там затирал наш (инцидент 13.11.26).
 ///
 /// Тот же приём, что `resolve_stt_model` для STT и `DEEDUB_TTS_PRESET` для TTS.
 ///
 /// `pub(crate)`, потому что от пути зависит не только запуск движка, но и
 /// выбор формата промпта (`translation::PromptStyle`): у Index-Translate
 /// своя каноническая форма, и её надо знать по реально выбранной модели,
-/// а не только по env-переменной (в UI модель берётся из конфига плагина).
-pub(crate) fn resolve_model_path(app: &AppHandle) -> Result<String, String> {
+/// а не только по env-переменной (в UI модель берётся из нашего config.toml).
+pub(crate) fn resolve_model_path() -> Result<String, String> {
     if let Ok(p) = std::env::var("DEEDUB_LLM_MODEL") {
         if !p.is_empty() {
             if Path::new(&p).is_file() {
@@ -265,12 +266,12 @@ pub(crate) fn resolve_model_path(app: &AppHandle) -> Result<String, String> {
         }
     }
 
-    let cfg = tauri_plugin_llama_engine::engine::load_config(app);
-    cfg.last_model
+    let cfg = crate::config::load();
+    cfg.translation_model
         .filter(|p| !p.is_empty())
         .ok_or_else(|| {
-            "Модель перевода не выбрана.\nОткройте Настройки → «Локальные модели перевода» \
-             и добавьте модель (скачайте из каталога или выберите файл GGUF)."
+            "Модель перевода не выбрана.\nВыберите её в списке «Модель перевода» \
+             на главной вкладке (или добавьте в Настройках → «Локальные модели перевода»)."
                 .to_string()
         })
 }

@@ -360,3 +360,150 @@
   margin-top: 10px;
   line-height: 1.6;
 }
+
+/* ===== Live-вкладка ===== */
+
+.live {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.live-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0;
+  text-align: left;
+}
+
+.live-setup label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.live-setup input,
+.live-setup select {
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
+.live-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.live-buttons button {
+  padding: 8px 20px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.live-error {
+  border: 1px solid #b33;
+  background: rgba(179, 51, 51, 0.12);
+  color: #e66;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: left;
+  margin: 10px 0;
+}
+
+.live-player {
+  position: relative;
+  margin: 10px 0;
+}
+
+.live-player video {
+  width: 100%;
+  max-height: 480px;
+  background: #000;
+  border-radius: 8px;
+}
+
+.live-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  opacity: 0.55;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.live-status {
+  font-size: 12px;
+  color: var(--text);
+  text-align: left;
+  margin-top: 8px;
+  line-height: 1.6;
+}
+
+/* EN-сабы live-режима (шаг 2): оверлей поверх плеера, позиция как у
+   субтитров YouTube — низ по центру, крупный читаемый текст. */
+.live-subs-overlay {
+  position: absolute;
+  left: 50%;
+  bottom: 10%;
+  transform: translateX(-50%);
+  max-width: 86%;
+  padding: 4px 12px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1.35;
+  text-align: center;
+  border-radius: 6px;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+
+/* Строки контролов live-вкладки (шаги 3-5): источник/канал, задержка/
+   качество/прокси, голос+дубляж. */
+.live-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.live-file-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.live-file-path {
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.7;
+  word-break: break-all;
+  max-width: 340px;
+}
+
+/* RU-сабы live-режима (шаг 3): оверлей выше EN (bottom 10% занят им),
+   зелёная плашка — визуально отделяет перевод от оригинала. */
+.live-subs-ru {
+  position: absolute;
+  left: 50%;
+  bottom: 20%;
+  transform: translateX(-50%);
+  max-width: 86%;
+  padding: 4px 12px;
+  background: rgba(12, 46, 12, 0.78);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1.35;
+  text-align: center;
+  border-radius: 6px;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
