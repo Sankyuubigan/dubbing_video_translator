@@ -628,6 +628,12 @@ pub fn run() {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(120);
                 let sh = app.handle().clone();
+                // Режим сессии (13.11.26): env DEEDUB_LIVE_SELFTEST_MODE=watch
+                // гоняет селфтест в режиме «только плеер» (stt/mt/tts = off,
+                // ноль движков). Пусто/не задано — дефолт live_start ("dub").
+                let mode_arg = std::env::var("DEEDUB_LIVE_SELFTEST_MODE")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty());
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     log::info!(
@@ -653,6 +659,7 @@ pub fn run() {
                                 Some(target.clone()),
                                 Some(voice_s),
                                 Some(true),
+                                mode_arg.clone(), // watch|dub; None = дефолт "dub"
                             )
                             .await
                         }
@@ -669,6 +676,7 @@ pub fn run() {
                                 None,
                                 Some(voice_s),
                                 Some(true),
+                                mode_arg.clone(), // watch|dub; None = дефолт "dub"
                             )
                             .await
                         }
@@ -685,6 +693,7 @@ pub fn run() {
                                 None,
                                 Some(voice_s),
                                 Some(true),
+                                mode_arg.clone(), // watch|dub; None = дефолт "dub"
                             )
                             .await
                         }
@@ -696,32 +705,40 @@ pub fn run() {
                     // Проба полного пути озвучки (шаг 4): фронт в селфтесте не
                     // подключён — зовём live_synth напрямую, как это делает
                     // фронт за LEAD-секунды до t0. t0/t1 далеко в будущем, у
-                    // события живёт только счётчик DUB_N.
-                    let sh2 = sh.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
-                        let res = live::live_synth(
-                            999999,
-                            1000.0,
-                            1003.0,
-                            "Проверка озвучки: рейтинг 9.5".into(),
+                    // события живёт только счётчик DUB_N. В watch-режиме
+                    // озвучки нет (движков нет) — проба бессмысленна.
+                    if mode_arg.as_deref() == Some("watch") {
+                        log::info!(
+                            "LIVE-SELFTEST: watch-режим — проба озвучки пропущена (движков нет)"
                         );
-                        match res {
-                            Ok(()) => log::info!("LIVE-SELFTEST: проба озвучки отправлена"),
-                            Err(e) => log::error!("LIVE-SELFTEST: проба озвучки: {e}"),
-                        }
-                        let _ = sh2;
-                    });
+                    } else {
+                        let sh2 = sh.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                            let res = live::live_synth(
+                                999999,
+                                1000.0,
+                                1003.0,
+                                "Проверка озвучки: рейтинг 9.5".into(),
+                            );
+                            match res {
+                                Ok(()) => log::info!("LIVE-SELFTEST: проба озвучки отправлена"),
+                                Err(e) => log::error!("LIVE-SELFTEST: проба озвучки: {e}"),
+                            }
+                            let _ = sh2;
+                        });
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(duration)).await;
                     let st = live::live_status();
                     log::info!(
-                        "LIVE-SELFTEST: subs={} ru={} dub={} | stt={} mt={} tts={} | state={} segs={} failed={} err={}",
+                        "LIVE-SELFTEST: subs={} ru={} dub={} | stt={} mt={} tts={} | mode={} state={} segs={} failed={} err={}",
                         live::audio::SUBS_N.load(std::sync::atomic::Ordering::SeqCst),
                         live::mt::RU_N.load(std::sync::atomic::Ordering::SeqCst),
                         live::tts::DUB_N.load(std::sync::atomic::Ordering::SeqCst),
                         st.stt_state,
                         st.mt_state,
                         st.tts_state,
+                        st.mode,
                         st.state,
                         st.segments_downloaded,
                         st.segments_failed,

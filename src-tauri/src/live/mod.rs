@@ -68,6 +68,9 @@ pub struct LiveStatus {
     pub stt_state: String,
     /// Источник сессии (шаг 5 PRP): twitch | url | file.
     pub source_kind: String,
+    /// Режим сессии (13.11.26): "dub" — полный комбайн (сабы+перевод+озвучка),
+    /// "watch" — только плеер (медиа-сервер + прокси, ноль движков).
+    pub mode: String,
     /// Состояние переводчика (шаг 3): off | loading | ready | failed: …
     pub mt_state: String,
     /// Состояние озвучки (шаг 4): off | loading | ready | failed: …
@@ -99,6 +102,7 @@ impl Default for LiveStatus {
             live_edge_pdt: String::new(),
             stt_state: "off".into(),
             source_kind: String::new(),
+            mode: "dub".into(),
             mt_state: "off".into(),
             tts_state: "off".into(),
             dub_enabled: false,
@@ -160,6 +164,43 @@ fn sanitize_channel(input: &str) -> Result<String, String> {
     }
 }
 
+/// Имя папки live-сессии: channel_display бывает ЛЮБОЙ (канал twitch, имя
+/// файла, сырая URL). URL содержит `:/?&=` — `create_dir_all` на Windows
+/// падает os error 123 (13.11.26: юзер вбил YouTube-ссылку, папка сессии не
+/// создалась). Оставляем буквы/цифры/`-_.`, прочее → `_`, повторные `_`
+/// схлопываем, длина ≤ 48, хвостовые точки/пробелы срезаем (Windows-квирк),
+/// пусто → «session».
+fn session_slug(input: &str) -> String {
+    let mapped: String = input
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut out = String::with_capacity(mapped.len());
+    let mut prev_underscore = false;
+    for c in mapped.chars() {
+        let u = c == '_';
+        if !(u && prev_underscore) {
+            out.push(c);
+        }
+        prev_underscore = u;
+    }
+    let mut out: String = out.chars().take(48).collect();
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "session".into()
+    } else {
+        out
+    }
+}
+
 #[tauri::command]
 pub async fn live_start(
     app: tauri::AppHandle,
@@ -174,6 +215,11 @@ pub async fn live_start(
     file_path: Option<String>,
     voice_wav: Option<String>,
     dub_enabled: Option<bool>,
+    // Режим сессии (13.11.26): "watch" — только плеер (медиа-сервер + прокси
+    // /media /audio, ноль движков: ни llama-server, ни CrispASR); "dub" —
+    // полный комбайн (сабы EN/RU + перевод + озвучка). Дефолт "dub" —
+    // селфтесты и старые вызовы работают без правок.
+    mode: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let source_kind = source_kind.unwrap_or_else(|| "twitch".into());
     if !matches!(source_kind.as_str(), "twitch" | "url" | "file") {
@@ -181,12 +227,18 @@ pub async fn live_start(
             "Неизвестный источник live: {source_kind} (twitch|url|file)"
         ));
     }
+    let mode = mode.unwrap_or_else(|| "dub".into());
+    if !matches!(mode.as_str(), "watch" | "dub") {
+        return Err(format!("Неизвестный режим live: {mode} (watch|dub)"));
+    }
+    let watch = mode == "watch";
     let delay_s = delay_s.unwrap_or(DEFAULT_DELAY_SECS).clamp(10.0, 60.0);
     let quality = quality.unwrap_or_else(|| "source".into());
     let voice = voice_wav.unwrap_or_default().trim().to_string();
     // Дубляж: явный флаг ИЛИ сам факт выбора голоса; без клон-референса
-    // клон-пресет невозможен (PRP шаг 4).
-    let dub = dub_enabled.unwrap_or(true) && !voice.is_empty();
+    // клон-пресет невозможен (PRP шаг 4). Watch-режим: голос и флаг дубляжа
+    // игнорируются — движков у сессии нет.
+    let dub = !watch && dub_enabled.unwrap_or(true) && !voice.is_empty();
 
     if session_slot().lock().unwrap().is_some() {
         return Err("Live-сессия уже запущена — сначала нажмите Стоп".into());
@@ -274,7 +326,7 @@ pub async fn live_start(
     let dir = live_root.join(format!(
         "{}_{}",
         chrono::Utc::now().format("%Y%m%d_%H%M%S%3f"),
-        channel
+        session_slug(&channel_display)
     ));
     std::fs::create_dir_all(&dir).map_err(|e| format!("Не создать папку сессии: {e}"))?;
 
@@ -302,6 +354,7 @@ pub async fn live_start(
             variant: variant.clone(),
             delay_s,
             source_kind: source_kind.clone(),
+            mode: mode.clone(),
             dub_enabled: dub,
             ..LiveStatus::default()
         };
@@ -329,17 +382,24 @@ pub async fn live_start(
 
     // Шаг 3 (PRP): переводчик на сессию — сабы ядро, заводится всегда; шаг 4:
     // TTS-воркер только с голосом (dub). Канал закрывается дропом Session.
-    let mt_tx = mt::start(app.clone(), cancel.clone());
-    let tts_tx = if dub {
-        Some(tts::start(
-            app.clone(),
-            cancel.clone(),
-            dir.clone(),
-            voice.clone(),
-            delay_s,
-        ))
+    // Watch-режим (13.11.26): ноль движков — ни MT-очереди, ни TTS-воркера;
+    // llama-server в VRAM не поднимается вовсе.
+    let (mt_tx, tts_tx) = if watch {
+        (None, None)
     } else {
-        None
+        let mt_tx = mt::start(app.clone(), cancel.clone());
+        let tts_tx = if dub {
+            Some(tts::start(
+                app.clone(),
+                cancel.clone(),
+                dir.clone(),
+                voice.clone(),
+                delay_s,
+            ))
+        } else {
+            None
+        };
+        (Some(mt_tx), tts_tx)
     };
     {
         let mut slot = session_slot().lock().unwrap();
@@ -351,32 +411,38 @@ pub async fn live_start(
     // Шаг 2 (PRP): STT-движок поднимается в фоне — не блокирует старт плеера;
     // аудио-конвейер получает сегменты от даунлоадера и пишет фразы в
     // live-subs, финалы уходят мостом в очередь MT (шаг 3).
-    let engine_port = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let audio_pipe =
-        audio::AudioPipeline::start(app.clone(), engine_port.clone(), Some(mt_tx));
-    {
-        let st = status_slot();
-        st.lock().unwrap().stt_state = "loading".into();
-    }
-    let status_for_engine = status_slot();
-    let engine_handle = tauri::async_runtime::spawn_blocking(move || {
-        match engine::SttEngine::spawn() {
-            Ok(eng) => {
-                engine_port.store(eng.ws_port as u64, std::sync::atomic::Ordering::SeqCst);
-                status_for_engine.lock().unwrap().stt_state = "ready".into();
-                // Движок хранится в Session: teardown погасит его через Drop.
-                // Если сессия уже остановлена (слот пуст) — eng просто
-                // дропнется здесь, VRAM освободится.
-                if let Some(s) = session_slot().lock().unwrap().as_mut() {
-                    s.engine = Some(eng);
+    // Watch-режим (13.11.26): ни STT-движка, ни аудио-конвейера — подача
+    // аудио в STT не нужна, stt_state остаётся "off", CrispASR не стартует.
+    let (audio_pipe, engine_handle) = if watch {
+        (None, None)
+    } else {
+        let engine_port = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let audio_pipe = audio::AudioPipeline::start(app.clone(), engine_port.clone(), mt_tx);
+        {
+            let st = status_slot();
+            st.lock().unwrap().stt_state = "loading".into();
+        }
+        let status_for_engine = status_slot();
+        let engine_handle = tauri::async_runtime::spawn_blocking(move || {
+            match engine::SttEngine::spawn() {
+                Ok(eng) => {
+                    engine_port.store(eng.ws_port as u64, std::sync::atomic::Ordering::SeqCst);
+                    status_for_engine.lock().unwrap().stt_state = "ready".into();
+                    // Движок хранится в Session: teardown погасит его через Drop.
+                    // Если сессия уже остановлена (слот пуст) — eng просто
+                    // дропнется здесь, VRAM освободится.
+                    if let Some(s) = session_slot().lock().unwrap().as_mut() {
+                        s.engine = Some(eng);
+                    }
+                }
+                Err(e) => {
+                    status_for_engine.lock().unwrap().stt_state = format!("failed: {e}");
+                    log::error!("{e}");
                 }
             }
-            Err(e) => {
-                status_for_engine.lock().unwrap().stt_state = format!("failed: {e}");
-                log::error!("{e}");
-            }
-        }
-    });
+        });
+        (Some(audio_pipe), Some(engine_handle))
+    };
 
     if let Some(info) = vod {
         // YouTube-VOD (12.11.26): как файловый режим, но медиа удалённое —
@@ -392,11 +458,15 @@ pub async fn live_start(
             audio_url: if audio_sep { info.audio_url.clone() } else { None },
             headers: info.headers.clone(),
         });
-        let audio_src = info
-            .audio_url
-            .clone()
-            .unwrap_or_else(|| info.video_url.clone().unwrap_or_default());
-        audio_pipe.open_url(audio_src, info.headers.clone()).await;
+        // Аудио-конвейер (STT/MT/TTS) — только в dub-режиме; в watch прокси
+        // /media /audio уже настроены выше, ориг. звук идёт плееру.
+        if let Some(pipe) = &audio_pipe {
+            let audio_src = info
+                .audio_url
+                .clone()
+                .unwrap_or_else(|| info.video_url.clone().unwrap_or_default());
+            pipe.open_url(audio_src, info.headers.clone()).await;
+        }
         {
             let slot = status_slot();
             let mut st = slot.lock().unwrap();
@@ -406,7 +476,7 @@ pub async fn live_start(
             st.remote_audio = audio_sep;
         }
         log::info!(
-            "Live: VOD {} — плеер /media{} (дубляж: {dub})",
+            "Live: VOD {} — плеер /media{} (режим: {mode})",
             channel_display,
             if audio_sep { " + /audio (ориг. звук)" } else { "" }
         );
@@ -414,6 +484,7 @@ pub async fn live_start(
             "port": port,
             "channel": channel_display,
             "variant": "",
+            "mode": mode,
         }));
     }
 
@@ -421,8 +492,11 @@ pub async fn live_start(
         // Файл (шаг 5 PRP): манифеста нет — порт и «playing» сразу; плеер
         // фронтенда идёт на /media, аудио-конвейер тянет файл с бэкпрешером
         // (30–100× реалтайм → STT/MT естественным образом отстают на минуты,
-        // что и есть «буфер» файлового режима).
-        audio_pipe.open_file(fpath.clone()).await;
+        // что и есть «буфер» файлового режима). В watch-режиме конвейер не
+        // заводится: файл отдаёт /media-прокси из shared.local_file.
+        if let Some(pipe) = &audio_pipe {
+            pipe.open_file(fpath.clone()).await;
+        }
         {
             let slot = status_slot();
             let mut st = slot.lock().unwrap();
@@ -431,13 +505,14 @@ pub async fn live_start(
             st.player_kind = "file".into();
         }
         log::info!(
-            "Live: файл {} — плеер http://127.0.0.1:{port}/media (дубляж: {dub})",
+            "Live: файл {} — плеер http://127.0.0.1:{port}/media (режим: {mode})",
             fpath.display()
         );
         return Ok(serde_json::json!({
             "port": port,
             "channel": channel_display,
             "variant": "",
+            "mode": mode,
         }));
     }
 
@@ -462,7 +537,10 @@ pub async fn live_start(
         let mut slot = session_slot().lock().unwrap();
         if let Some(s) = slot.as_mut() {
             s.tasks.push(handle);
-            s.tasks.push(engine_handle);
+            // Watch-режим (13.11.26): STT-движок не спавнился — задачи нет.
+            if let Some(h) = engine_handle {
+                s.tasks.push(h);
+            }
         }
     }
 
@@ -486,9 +564,9 @@ pub async fn live_start(
     status_slot().lock().unwrap().port = port;
 
     log::info!(
-        "Live: стартовал {source_kind} «{channel_display}» (вариант {variant}), задержка {delay_s} с, плейлист http://127.0.0.1:{port}/live.m3u8"
+        "Live: стартовал {source_kind} «{channel_display}» (вариант {variant}), режим {mode}, задержка {delay_s} с, плейлист http://127.0.0.1:{port}/live.m3u8"
     );
-    Ok(serde_json::json!({ "port": port, "channel": channel_display, "variant": variant }))
+    Ok(serde_json::json!({ "port": port, "channel": channel_display, "variant": variant, "mode": mode }))
 }
 
 /// Синтез фразы дубляжа (шаг 4 PRP): триггерит ФРОНТ, когда playhead дошёл до
@@ -596,7 +674,9 @@ struct LoopCtx {
     shared: Arc<server::ServerShared>,
     dir: PathBuf,
     /// Шаг 2: аудио-конвейер (ffmpeg-pipe → кольцо → crispasr → live-subs).
-    audio: audio::AudioPipeline,
+    /// None в watch-режиме (13.11.26): сегменты качаются только для плеера,
+    /// аудио в STT не подаётся.
+    audio: Option<audio::AudioPipeline>,
     /// Шаг 5: источник (twitch|url) — GQL-перерезолв только для twitch.
     source_kind: String,
 }
@@ -793,25 +873,28 @@ async fn downloader_loop(mut ctx: LoopCtx) {
                     None
                 };
 
-            // Шаг 2: аудио-конвейер. Разрыв/реклама/дыра закрывают блок,
+            // Шаг 2: аудио-конвейер (dub-режим; в watch его нет — сегменты
+            // качаются только для плеера). Разрыв/реклама/дыра закрывают блок,
             // следующий не-рекламный сегмент открывает новый — с init впереди
             // (без moov проба ffmpeg не распознает fMP4, блок умрёт).
-            if disc || s.is_ad {
-                audio_block_open = false;
-                ctx.audio.restart().await;
-            }
-            if !s.is_ad {
-                if !audio_block_open {
-                    // Якорь блока = PDT (явный или достроенный) первого МЕДИА-
-                    // сегмента; у init PDT нет, init пишется следом (порядок в
-                    // пайпе обязателен: без moov проба ffmpeg не распознает fMP4).
-                    ctx.audio.open_block(anchor).await;
-                    if let Some(init) = &cur_map_bytes {
-                        ctx.audio.feed(Arc::clone(init), None).await;
-                    }
-                    audio_block_open = true;
+            if let Some(audio) = &ctx.audio {
+                if disc || s.is_ad {
+                    audio_block_open = false;
+                    audio.restart().await;
                 }
-                ctx.audio.feed(Arc::new(bytes), anchor).await;
+                if !s.is_ad {
+                    if !audio_block_open {
+                        // Якорь блока = PDT (явный или достроенный) первого МЕДИА-
+                        // сегмента; у init PDT нет, init пишется следом (порядок в
+                        // пайпе обязателен: без moov проба ffmpeg не распознает fMP4).
+                        audio.open_block(anchor).await;
+                        if let Some(init) = &cur_map_bytes {
+                            audio.feed(Arc::clone(init), None).await;
+                        }
+                        audio_block_open = true;
+                    }
+                    audio.feed(Arc::new(bytes), anchor).await;
+                }
             }
 
             window.push_back(ServedSeg {
@@ -914,5 +997,24 @@ mod tests {
         assert_eq!(sanitize_channel("www.twitch.tv/some_name/").unwrap(), "some_name");
         assert!(sanitize_channel("!!!").is_err());
         assert!(sanitize_channel("").is_err());
+    }
+
+    #[test]
+    fn session_slug_makes_valid_windows_name() {
+        // YouTube-ссылка (реальный кейс 13.11.26): `:/?&=` недопустимы в имени
+        // папки Windows — os error 123.
+        let slug = session_slug("https://www.youtube.com/watch?v=q1v4IuOoWiI");
+        assert!(!slug.contains([':', '/', '?', '&', '=']));
+        assert!(slug.len() <= 48);
+        assert!(!slug.is_empty());
+        // Схема схлопнулась, вопрос-параметры заменены.
+        assert!(slug.starts_with("https_"));
+        // Имя файла и канал не искажаются.
+        assert_eq!(session_slug("test_TTS_dubbing.mp4"), "test_TTS_dubbing.mp4");
+        assert_eq!(session_slug("bogur"), "bogur");
+        // Хвостовые точки запрещены Windows; пусто → дефолт.
+        assert_eq!(session_slug("name..."), "name");
+        assert_eq!(session_slug("///"), "session");
+        assert_eq!(session_slug(""), "session");
     }
 }

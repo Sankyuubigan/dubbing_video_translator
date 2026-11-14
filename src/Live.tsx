@@ -32,6 +32,8 @@ interface LiveStatus {
   live_edge_pdt: string;
   stt_state: string;
   source_kind: string;
+  // Режим сессии (13.11.26): "watch" — только плеер, "dub" — полный комбайн.
+  mode?: string;
   mt_state: string;
   tts_state: string;
   dub_enabled: boolean;
@@ -468,7 +470,7 @@ export default function Live() {
 
   const running = !!status?.running;
 
-  const handleStart = async () => {
+  const handleStart = async (mode: "watch" | "dub") => {
     setBusy(true);
     setErr("");
     try {
@@ -483,6 +485,7 @@ export default function Live() {
         filePath: cfg.filePath,
         voiceWav: cfg.voice,
         dubEnabled: cfg.dub && cfg.voice !== "",
+        mode,
       });
     } catch (e) {
       setErr(String(e));
@@ -649,6 +652,7 @@ export default function Live() {
               type="checkbox"
               checked={cfg.dub}
               onChange={(e) => updateCfg({ dub: e.target.checked })}
+              disabled={running}
             />{" "}
             Озвучка дубляжа
           </label>
@@ -667,9 +671,22 @@ export default function Live() {
 
         <div className="live-buttons">
           {!running ? (
-            <button onClick={handleStart} disabled={startDisabled}>
-              Запустить
-            </button>
+            <>
+              <button
+                onClick={() => handleStart("watch")}
+                disabled={startDisabled}
+                title="Только плеер: оригинальный звук и слайдер громкости. Ноль движков — ни llama-server, ни CrispASR; сабов/перевода/озвучки не будет."
+              >
+                Смотреть
+              </button>
+              <button
+                onClick={() => handleStart("dub")}
+                disabled={startDisabled}
+                title="Полный комбайн: EN/RU-сабы + перевод + озвучка дубляжа."
+              >
+                Дубляж
+              </button>
+            </>
           ) : (
             <button onClick={handleStop} disabled={busy}>
               Остановить
@@ -704,6 +721,7 @@ export default function Live() {
             {status.source_kind.toUpperCase()}: {status.channel || "—"} · состояние:{" "}
             {status.state}
             {status.state === "degraded" && ` (${status.last_error})`}
+            {status.mode === "watch" && " · плеер (без дубляжа)"}
           </div>
           <div>
             STT: {status.stt_state} · MT: {status.mt_state} · TTS: {status.tts_state}
