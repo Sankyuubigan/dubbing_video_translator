@@ -12,11 +12,11 @@ if not exist "%PROJ%\src-tauri\tauri.conf.json" (
 )
 
 set "TOOLKIT=%TAURI_BUILD_TOOLKIT%"
-if "%TOOLKIT%"=="" set "TOOLKIT=%~dp0..\my-tauri-plugins\tauri-build-toolkit\cli.cjs"
+if "%TOOLKIT%"=="" set "TOOLKIT=%~dp0..\cross-app-plugins\tauri-build-toolkit\cli.cjs"
 if not exist "%TOOLKIT%" (
   echo [ERROR] Tauri build toolkit not found: "%TOOLKIT%"
   echo Set env TAURI_BUILD_TOOLKIT to the toolkit cli.cjs, or place the
-  echo toolkit folder at: my-tauri-plugins\tauri-build-toolkit
+  echo toolkit folder at: cross-app-plugins\tauri-build-toolkit
   pause
   exit /b 1
 )

@@ -270,7 +270,7 @@ Index-9B, chunk 36 = `FAIL` по `9.5`): RU SRT содержал 37 cue, из н
 - **Прочее (общие GGUF в той же папке):** flow-q8_0 + campplus-f16 + s3tok-f16 + hift-f16 + voices.gguf
 - Base-версия `cosyvoice3-tts` (т.е. `cosyvoice3-llm-q4_k.gguf`) УДАЛЕНА с диска и из `speech_models.json` — она глючила (обрезание финальных слогов в cross-lingual режиме). RL-постобучение стабильнее: на тесте 38 чанков обрезаний нет.
 - Выбор модели: env `DEEDUB_TTS_PRESET` (приоритет, для headless A/B) → `tts_settings.json` → `preset` → дефолт `cosyvoice3-tts-rl`.
-- **Пресеты — ЕДИНЫЙ источник: `tauri-plugin-speech/speech_models.json`.** Плагин подключается через path-зависимость (`Cargo.toml:42`), его `include_str!` компилируется из этой папки при каждой сборке. `src-tauri/speech_models.json` УДАЛЁН (и из `tauri.conf.json` resources тоже) — внешний файл рядом с exe больше не создаётся. Любая правка пресетов делается только в плагине (`D:\Projects\my-tauri-plugins\tauri-plugin-speech\speech_models.json`).
+- **Пресеты — ЕДИНЫЙ источник: `tauri-plugin-speech/speech_models.json`.** Плагин подключается через path-зависимость (`Cargo.toml:42`), его `include_str!` компилируется из этой папки при каждой сборке. `src-tauri/speech_models.json` УДАЛЁН (и из `tauri.conf.json` resources тоже) — внешний файл рядом с exe больше не создаётся. Любая правка пресетов делается только в плагине (`D:\Projects\cross-app-plugins\tauri-plugin-speech\speech_models.json`).
 
 ### Retry-костыль и declick (только для base `cosyvoice3-tts`)
 - Историческая причина: base-модель в cross-lingual (EN-голос → RU-текст) выбрасывает LM reference-tokens и «обрезает» финальные слоги; RAS-семплер seed-зависим и даёт щелчки.
@@ -368,14 +368,14 @@ Index-9B, chunk 36 = `FAIL` по `9.5`): RU SRT содержал 37 cue, из н
 
 Сборка/тесты выполняются ТОЛЬКО через `.bat`-обёртки (desktop §2 — прямой вызов `cargo`/`npx tauri` запрещён).
 `build.bat`, `test.bat`, `generate_installer.bat`, `release.bat` — шаблоны общего тулкита
-`..\my-tauri-plugins\tauri-build-toolkit` (единый источник правды для всех проектов). Настройки
+`..\cross-app-plugins\tauri-build-toolkit` (единый источник правды для всех проектов). Настройки
 проекта — `.build-config.json` в корне (repo, appExe, productName, signing, ...).
 
 **ВАЖНО:** команды `build`/`prep`/`installer`/`release` автоматически бампят версию по схеме YY.M.P
 в `src-tauri/tauri.conf.json` + `Cargo.toml` при каждом запуске. Dev-сборка (`build`) собирает без
 бандла (dev-override), `installer`/`release` включают `bundle.active`.
 
-Read-only диагностика: `node ..\my-tauri-plugins\tauri-build-toolkit\cli.cjs doctor --project "%CD%"`.
+Read-only диагностика: `node ..\cross-app-plugins\tauri-build-toolkit\cli.cjs doctor --project "%CD%"`.
 
 ### Commands
 

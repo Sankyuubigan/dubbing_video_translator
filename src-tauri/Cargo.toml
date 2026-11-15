@@ -67,21 +67,21 @@ tauri = { version = "2.0.0", features = [] }
 tauri-plugin-dialog = "2.0.0-rc"
 tauri-plugin-fs = "2.0.0-rc"
 tauri-plugin-process = "2.0.0-rc"
-tauri-plugin-speech = { path = "../../my-tauri-plugins/tauri-plugin-speech" }
-tauri-plugin-logs = { path = "../../my-tauri-plugins/tauri-plugin-logs" }
+tauri-plugin-speech = { path = "../../cross-app-plugins/tauri-plugin-speech" }
+tauri-plugin-logs = { path = "../../cross-app-plugins/tauri-plugin-logs" }
 # Единый движок скачивания: его использует плагин движка LLM для загрузки
 # llama-server.exe и моделей (desktop §6.7 — LLM только отдельным процессом).
-tauri-plugin-downloader = { path = "../../my-tauri-plugins/tauri-plugin-downloader" }
-tauri-plugin-llama-engine = { path = "../../my-tauri-plugins/tauri-plugin-llama-engine", features = ["host-logs"] }
+tauri-plugin-downloader = { path = "../../cross-app-plugins/tauri-plugin-downloader" }
+tauri-plugin-llama-engine = { path = "../../cross-app-plugins/tauri-plugin-llama-engine", features = ["host-logs"] }
 # Потоковый ffmpeg-pipe для live-режима (шаг 2 PRP): код пайпа — в плагине,
 # резолв пути к exe остаётся у хоста (crate::ffmpeg::resolve — ССОТ).
-tauri-plugin-ffmpeg = { path = "../../my-tauri-plugins/tauri-plugin-ffmpeg" }
+tauri-plugin-ffmpeg = { path = "../../cross-app-plugins/tauri-plugin-ffmpeg" }
 # Резолвер HLS-ссылок для live-источников «URL» (шаг 5 PRP): yt-dlp.exe,
 # его установка/обновление и прокси — ССОТ плагина (указание юзера).
 # Сам плагин не регистрируется в app — хост зовёт engine::ytdlp_manager напрямую.
-tauri-plugin-ytdlp = { path = "../../my-tauri-plugins/tauri-plugin-ytdlp" }
+tauri-plugin-ytdlp = { path = "../../cross-app-plugins/tauri-plugin-ytdlp" }
 # WS-клиент /v1/realtime движка crispasr (live, шаг 2). Версия 0.24 — как в
-# my-tauri-plugins (один бинарь в lockfile). Протокол: JSON-кадры, аудио —
+# cross-app-plugins (один бинарь в lockfile). Протокол: JSON-кадры, аудио —
 # base64 s16le (проба 0.8.43: корневой WS плагина мёртв — 404 no matching route).
 tungstenite = "0.24"
 # Base64 для input_audio_buffer.append того же протокола.

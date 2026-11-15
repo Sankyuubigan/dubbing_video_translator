@@ -72,8 +72,8 @@ h1 {
   margin-bottom: 8px;
 }
 
-/* Токены темы для Web Components плагинов my-tauri-plugins: они читают их
-   внутри shadow DOM. Контракт — my-tauri-plugins/PLUGIN_STANDARD.md. */
+/* Токены темы для Web Components плагинов cross-app-plugins: они читают их
+   внутри shadow DOM. Контракт — cross-app-plugins/PLUGIN_STANDARD.md. */
 .settings speech-engine-panel,
 .settings speech-models-panel,
 .settings speech-voice-storage,
