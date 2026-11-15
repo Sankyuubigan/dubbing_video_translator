@@ -137,7 +137,7 @@ fn worker(
         // конвертер ловит хвост — PRP шаг 4).
         let text = super::digits::digits_to_words(&job.ru);
         let t_start = Instant::now();
-        let state = app.state::<tauri_plugin_speech::PluginState>();
+        let state = app.state::<plugin_speech_gen_engine::PluginState>();
         let speak_fut = state.tts.speak(&text, "", "", "", 1.0, true, "ru", "en", None);
         let wav = match crate::block_on(speak_fut) {
             Ok((bytes, _timing)) => bytes,
@@ -210,10 +210,10 @@ fn emit_dub_empty(app: &tauri::AppHandle, job: &TtsJob) {
 /// Подъём TTS-движка: resolve пресета/моделей как в файловом пайплайне
 /// (tts/mod.rs:640-680), затем ensure плагина speech с клон-референсом.
 fn ensure_engine(app: &tauri::AppHandle, voice_wav: &str) -> Result<(), String> {
-    let state = app.state::<tauri_plugin_speech::PluginState>();
-    let tss = tauri_plugin_speech::tts_settings::load(app);
+    let state = app.state::<plugin_speech_gen_engine::PluginState>();
+    let tss = plugin_speech_gen_engine::tts_settings::load(app);
     let models_dir = if tss.models_dir.trim().is_empty() {
-        tauri_plugin_speech::download::default_models_dir()
+        plugin_speech_gen_engine::download::default_models_dir()
     } else {
         std::path::PathBuf::from(tss.models_dir.clone())
     };
@@ -226,7 +226,7 @@ fn ensure_engine(app: &tauri::AppHandle, voice_wav: &str) -> Result<(), String> 
             if s.is_empty() { None } else { Some(s.to_string()) }
         })
         .unwrap_or_else(|| "cosyvoice3-tts-rl".to_string());
-    let tts_backend = tauri_plugin_speech::download::preset_backend(&preset_id)
+    let tts_backend = plugin_speech_gen_engine::download::preset_backend(&preset_id)
         .map(|b| b.to_string())
         .unwrap_or_else(|| preset_id.clone());
     log::info!(

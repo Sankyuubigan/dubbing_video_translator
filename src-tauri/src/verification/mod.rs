@@ -1,7 +1,7 @@
 use crate::comm::{PipelineContext, SubtitleChunk, SKIP_MARKER};
 use crate::llm::{message, LlmSession};
 use anyhow::Result;
-use tauri_plugin_llama_engine::engine::LlmMessage;
+use plugin_llama_engine::engine::LlmMessage;
 
 /// Эмпирическая норма: ≤ 20 символов на секунду речи (Netflix ~42 символа
 /// на строку, строка ≈ 2 сек). Точность: 10% запас (22 симв/сек) чтобы

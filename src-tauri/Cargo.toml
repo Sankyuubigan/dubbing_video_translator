@@ -67,19 +67,19 @@ tauri = { version = "2.0.0", features = [] }
 tauri-plugin-dialog = "2.0.0-rc"
 tauri-plugin-fs = "2.0.0-rc"
 tauri-plugin-process = "2.0.0-rc"
-tauri-plugin-speech = { path = "../../cross-app-plugins/tauri-plugin-speech" }
-tauri-plugin-logs = { path = "../../cross-app-plugins/tauri-plugin-logs" }
+plugin-speech-gen-engine = { path = "../../cross-app-plugins/plugin-speech-gen-engine" }
+plugin-log-collector = { path = "../../cross-app-plugins/plugin-log-collector" }
 # Единый движок скачивания: его использует плагин движка LLM для загрузки
 # llama-server.exe и моделей (desktop §6.7 — LLM только отдельным процессом).
-tauri-plugin-downloader = { path = "../../cross-app-plugins/tauri-plugin-downloader" }
-tauri-plugin-llama-engine = { path = "../../cross-app-plugins/tauri-plugin-llama-engine", features = ["host-logs"] }
+plugin-downloader = { path = "../../cross-app-plugins/plugin-downloader" }
+plugin-llama-engine = { path = "../../cross-app-plugins/plugin-llama-engine", features = ["host-logs"] }
 # Потоковый ffmpeg-pipe для live-режима (шаг 2 PRP): код пайпа — в плагине,
 # резолв пути к exe остаётся у хоста (crate::ffmpeg::resolve — ССОТ).
-tauri-plugin-ffmpeg = { path = "../../cross-app-plugins/tauri-plugin-ffmpeg" }
+plugin-ffmpeg-wrapper = { path = "../../cross-app-plugins/plugin-ffmpeg-wrapper" }
 # Резолвер HLS-ссылок для live-источников «URL» (шаг 5 PRP): yt-dlp.exe,
 # его установка/обновление и прокси — ССОТ плагина (указание юзера).
 # Сам плагин не регистрируется в app — хост зовёт engine::ytdlp_manager напрямую.
-tauri-plugin-ytdlp = { path = "../../cross-app-plugins/tauri-plugin-ytdlp" }
+plugin-ytdlp-wrapper = { path = "../../cross-app-plugins/plugin-ytdlp-wrapper" }
 # WS-клиент /v1/realtime движка crispasr (live, шаг 2). Версия 0.24 — как в
 # cross-app-plugins (один бинарь в lockfile). Протокол: JSON-кадры, аудио —
 # base64 s16le (проба 0.8.43: корневой WS плагина мёртв — 404 no matching route).

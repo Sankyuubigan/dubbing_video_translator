@@ -68,7 +68,7 @@ fn kill_ytdlp_tree(child: &mut std::process::Child) {
 fn ytdlp_exe(app: &AppHandle) -> PathBuf {
     use tauri::Manager;
 
-    let cfg = tauri_plugin_ytdlp::engine::load_config(app);
+    let cfg = plugin_ytdlp_wrapper::engine::load_config(app);
     let dir = match cfg.ytdlp_dir.as_deref() {
         Some(p) if !p.trim().is_empty() => PathBuf::from(p),
         _ => {
@@ -76,10 +76,10 @@ fn ytdlp_exe(app: &AppHandle) -> PathBuf {
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .unwrap_or_else(|| PathBuf::from("."));
-            tauri_plugin_ytdlp::engine::ytdlp_manager::default_dir(&exe_dir)
+            plugin_ytdlp_wrapper::engine::ytdlp_manager::default_dir(&exe_dir)
         }
     };
-    let p = tauri_plugin_ytdlp::engine::ytdlp_manager::get_exe_path(&dir);
+    let p = plugin_ytdlp_wrapper::engine::ytdlp_manager::get_exe_path(&dir);
     if p.exists() {
         return p;
     }

@@ -652,10 +652,10 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
     // Инициализация движка CrispASR (cosyvoice3-tts, GPU).
     let app = crate::app_handle()
         .ok_or_else(|| anyhow::anyhow!("TTS: AppHandle не инициализирован (запуск вне tauri?)"))?;
-    let state = app.state::<tauri_plugin_speech::PluginState>();
-    let tss = tauri_plugin_speech::tts_settings::load(app);
+    let state = app.state::<plugin_speech_gen_engine::PluginState>();
+    let tss = plugin_speech_gen_engine::tts_settings::load(app);
     let models_dir = if tss.models_dir.trim().is_empty() {
-        tauri_plugin_speech::download::default_models_dir()
+        plugin_speech_gen_engine::download::default_models_dir()
     } else {
         PathBuf::from(tss.models_dir.clone())
     };
@@ -671,7 +671,7 @@ pub fn dub(mut ctx: PipelineContext) -> Result<PipelineContext> {
             if s.is_empty() { None } else { Some(s.to_string()) }
         })
         .unwrap_or_else(|| "cosyvoice3-tts-rl".to_string());
-    let tts_backend = tauri_plugin_speech::download::preset_backend(&preset_id)
+    let tts_backend = plugin_speech_gen_engine::download::preset_backend(&preset_id)
         .map(|b| b.to_string())
         .unwrap_or_else(|| preset_id.clone());
     log::info!(

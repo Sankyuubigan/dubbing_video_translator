@@ -99,7 +99,7 @@ pub fn pick_engine_exe() -> Result<String, String> {
     let app = APP_HANDLE
         .get()
         .ok_or_else(|| "AppHandle не инициализирован".to_string())?;
-    let tss = tauri_plugin_speech::tts_settings::load(app);
+    let tss = plugin_speech_gen_engine::tts_settings::load(app);
 
     let mut candidates: Vec<String> = Vec::new();
     let saved = tss.engine_backend.trim();
@@ -113,7 +113,7 @@ pub fn pick_engine_exe() -> Result<String, String> {
     }
 
     for b in &candidates {
-        let p = tauri_plugin_speech::download::resolve_engine_exe(&tss.engine_dir, b);
+        let p = plugin_speech_gen_engine::download::resolve_engine_exe(&tss.engine_dir, b);
         if p.exists() {
             return Ok(p.to_string_lossy().to_string());
         }
@@ -326,10 +326,10 @@ fn set_translation_model(
 
     // Реестр моделей плагина — общий каталог: регистрируем файл, если его там
     // ещё нет (иначе панель при следующем открытии решит, что модели нет).
-    let mut eng = tauri_plugin_llama_engine::engine::load_config(&app);
+    let mut eng = plugin_llama_engine::engine::load_config(&app);
     if !eng.models.iter().any(|m| m == &path) {
         eng.models.push(path.clone());
-        tauri_plugin_llama_engine::engine::save_config(&app, &eng)
+        plugin_llama_engine::engine::save_config(&app, &eng)
             .map_err(|e| format!("Не удалось зарегистрировать модель в каталоге: {e}"))?;
     }
 
@@ -351,7 +351,7 @@ fn list_translation_models(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<Vec<ModelChoice>, String> {
-    let cfg = tauri_plugin_llama_engine::engine::load_config(&app);
+    let cfg = plugin_llama_engine::engine::load_config(&app);
     let mut models: Vec<ModelChoice> = cfg
         .models
         .iter()
@@ -414,7 +414,7 @@ struct ModelChoice {
 /// Логирование — плагин `tauri-plugin-logs` (core §2.5.2): он ставит
 /// `log::Log`, пишет `deedub.log` рядом с exe, зеркалит в `test/last_logs.txt`
 /// и шлёт строки в UI по событию `logs:message`. Хост только подключает
-/// плагин в `base_builder` и вызывает `tauri_plugin_logs::early_init`
+/// плагин в `base_builder` и вызывает `plugin_log_collector::early_init`
 /// первой строкой входа (там же ловится паника до создания приложения).
 pub const LOG_FILE_NAME: &str = "deedub.log";
 
@@ -424,19 +424,19 @@ pub const LOG_FILE_NAME: &str = "deedub.log";
 fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         // Логи первыми: остальные плагины пишут через `log::` (core §2.5.2).
-        .plugin(tauri_plugin_logs::init())
+        .plugin(plugin_log_collector::init())
         // Единый движок скачивания — обязателен для плагина движка LLM.
-        .plugin(tauri_plugin_downloader::init())
+        .plugin(plugin_downloader::init())
         // Движок LLM: llama-server отдельным процессом, каталог моделей,
         // выбор активной модели (desktop §6.7).
-        .plugin(tauri_plugin_llama_engine::init())
+        .plugin(plugin_llama_engine::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_speech::init())
+        .plugin(plugin_speech_gen_engine::init())
         // ffmpeg-пайп live-режима: код в плагине, путь к exe резолвит хост
         // (crate::ffmpeg::resolve — ССОТ, desktop §2).
-        .plugin(tauri_plugin_ffmpeg::init())
+        .plugin(plugin_ffmpeg_wrapper::init())
         .manage(AppState {
             config: Mutex::new(app_cfg),
         })
@@ -458,8 +458,8 @@ fn base_builder(app_cfg: config::AppConfig) -> tauri::Builder<tauri::Wry> {
 /// Общий для GUI и headless вход: логгер (с ловлей паники до создания
 /// приложения) + папка конфига плагина движка LLM.
 fn init_logging_and_engine_config() {
-    tauri_plugin_logs::early_init(LOG_FILE_NAME);
-    tauri_plugin_llama_engine::engine::config::set_app_data_dir_name(APP_DATA_DIR_NAME);
+    plugin_log_collector::early_init(LOG_FILE_NAME);
+    plugin_llama_engine::engine::config::set_app_data_dir_name(APP_DATA_DIR_NAME);
 }
 
 /// Имя папки app-data — единый источник для `tauri-plugin-llama-engine`
@@ -484,7 +484,7 @@ fn adopt_legacy_model() -> config::AppConfig {
     if ours.translation_model.is_some() {
         return ours;
     }
-    let path = tauri_plugin_llama_engine::engine::config::app_data_dir_early()
+    let path = plugin_llama_engine::engine::config::app_data_dir_early()
         .join("app_config.json");
     let legacy = std::fs::read_to_string(&path).ok().and_then(|raw| {
         serde_json::from_str::<serde_json::Value>(&raw)
@@ -497,8 +497,8 @@ fn adopt_legacy_model() -> config::AppConfig {
     if !std::path::Path::new(&legacy).is_file() {
         // НЕ log::warn!: реальный логгер ставится только при старте Tauri,
         // всё log::* до этого молча теряется (найдено 19:13 прогоном миграции).
-        // Штатный ранний канал — tauri_plugin_logs::early_log (files + stderr).
-        tauri_plugin_logs::early_log(
+        // Штатный ранний канал — plugin_log_collector::early_log (files + stderr).
+        plugin_log_collector::early_log(
             "WARN",
             &format!(
                 "LLM: в общем конфиге плагина last_model = «{legacy}» — это не локальный файл \
@@ -510,12 +510,12 @@ fn adopt_legacy_model() -> config::AppConfig {
     }
     ours.translation_model = Some(legacy.clone());
     match config::save(&ours) {
-        Ok(()) => tauri_plugin_logs::early_log(
+        Ok(()) => plugin_log_collector::early_log(
             "INFO",
             &format!("LLM: усыновлена модель из общего конфига плагина: {legacy}"),
         ),
         Err(e) => {
-            tauri_plugin_logs::early_log(
+            plugin_log_collector::early_log(
                 "ERROR",
                 &format!("LLM: не удалось сохранить усыновлённую модель: {e}"),
             );

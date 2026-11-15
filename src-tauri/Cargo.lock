@@ -1348,6 +1348,12 @@ dependencies = [
  "dirs",
  "hound",
  "log",
+ "plugin-downloader",
+ "plugin-ffmpeg-wrapper",
+ "plugin-llama-engine",
+ "plugin-log-collector",
+ "plugin-speech-gen-engine",
+ "plugin-ytdlp-wrapper",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -1355,14 +1361,8 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
- "tauri-plugin-downloader",
- "tauri-plugin-ffmpeg",
  "tauri-plugin-fs",
- "tauri-plugin-llama-engine",
- "tauri-plugin-logs",
  "tauri-plugin-process",
- "tauri-plugin-speech",
- "tauri-plugin-ytdlp",
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.2",
@@ -3137,6 +3137,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "llama-engine-core"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "json-store",
+ "log",
+ "minijinja",
+ "nvml-wrapper",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tokio",
+ "zip",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3150,6 +3168,19 @@ name = "log"
 version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
+
+[[package]]
+name = "log-collector-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "log",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
 
 [[package]]
 name = "lru-slab"
@@ -4009,6 +4040,122 @@ dependencies = [
  "quick-xml",
  "serde",
  "time",
+]
+
+[[package]]
+name = "plugin-downloader"
+version = "0.1.0"
+dependencies = [
+ "curl",
+ "futures-util",
+ "log",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
+]
+
+[[package]]
+name = "plugin-ffmpeg-wrapper"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "plugin-downloader",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "zip",
+]
+
+[[package]]
+name = "plugin-llama-engine"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "json-store",
+ "llama-engine-core",
+ "log",
+ "minijinja",
+ "nvml-wrapper",
+ "plugin-downloader",
+ "plugin-log-collector",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
+ "zip",
+]
+
+[[package]]
+name = "plugin-log-collector"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "log",
+ "log-collector-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "plugin-speech-gen-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "audioadapter-buffers",
+ "chrono",
+ "hound",
+ "log",
+ "nnnoiseless",
+ "ogg",
+ "opus",
+ "plugin-downloader",
+ "reqwest 0.12.28",
+ "rubato",
+ "rusty_mp3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "symphonia",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
+ "tungstenite",
+ "windows 0.58.0",
+ "zip",
+]
+
+[[package]]
+name = "plugin-ytdlp-wrapper"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "json-store",
+ "lazy_static",
+ "log",
+ "regex",
+ "reqwest 0.12.28",
+ "rookie",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
+ "zip",
 ]
 
 [[package]]
@@ -5785,34 +5932,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-plugin-downloader"
-version = "0.1.0"
-dependencies = [
- "curl",
- "futures-util",
- "log",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "tokio",
-]
-
-[[package]]
-name = "tauri-plugin-ffmpeg"
-version = "0.1.0"
-dependencies = [
- "log",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "tauri-plugin-downloader",
- "zip",
-]
-
-[[package]]
 name = "tauri-plugin-fs"
 version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5837,43 +5956,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-plugin-llama-engine"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "json-store",
- "log",
- "minijinja",
- "nvml-wrapper",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tauri",
- "tauri-plugin",
- "tauri-plugin-downloader",
- "tauri-plugin-logs",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "tauri-plugin-logs"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "log",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "tauri-plugin-process"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5881,54 +5963,6 @@ checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
 dependencies = [
  "tauri",
  "tauri-plugin",
-]
-
-[[package]]
-name = "tauri-plugin-speech"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "audioadapter-buffers",
- "chrono",
- "hound",
- "log",
- "nnnoiseless",
- "ogg",
- "opus",
- "reqwest 0.12.28",
- "rubato",
- "rusty_mp3",
- "serde",
- "serde_json",
- "symphonia",
- "tauri",
- "tauri-plugin",
- "tauri-plugin-downloader",
- "tokio",
- "tungstenite",
- "windows 0.58.0",
- "zip",
-]
-
-[[package]]
-name = "tauri-plugin-ytdlp"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "json-store",
- "lazy_static",
- "log",
- "regex",
- "reqwest 0.12.28",
- "rookie",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-plugin",
- "tokio",
- "zip",
 ]
 
 [[package]]

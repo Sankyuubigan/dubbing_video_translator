@@ -222,7 +222,7 @@ fn open_block(
         "pipe:1".into(),
     ];
     log::info!("Live-audio: открываю аудио-блок (pdt0={pdt_secs:?})");
-    let pipe = tauri_plugin_ffmpeg::engine::pipe::FfmpegPipe::spawn(Path::new(&ffmpeg), &args)
+    let pipe = plugin_ffmpeg_wrapper::engine::pipe::FfmpegPipe::spawn(Path::new(&ffmpeg), &args)
         .map_err(|e| format!("ffmpeg-pipe не стартовал: {e}"))?;
     let (mut pipe_in, mut pipe_out, guard) = pipe.split();
 
@@ -302,7 +302,7 @@ fn open_media_block(
         "pipe:1".into(),
     ]);
     log::info!("Live-audio: блок {} (якорь 0)", label);
-    let pipe = tauri_plugin_ffmpeg::engine::pipe::FfmpegPipe::spawn(Path::new(&ffmpeg), &args)
+    let pipe = plugin_ffmpeg_wrapper::engine::pipe::FfmpegPipe::spawn(Path::new(&ffmpeg), &args)
         .map_err(|e| format!("ffmpeg-pipe не стартовал: {e}"))?;
     let (pipe_in, mut pipe_out, guard) = pipe.split();
     // ffmpeg с `-i <файл|url>` stdin не читает — конец пайпа закрываем сразу.

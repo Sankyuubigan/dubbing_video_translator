@@ -1,7 +1,7 @@
 use crate::comm::{PipelineContext, SubtitleChunk};
 use crate::llm::{message, LlmSession};
 use anyhow::Result;
-use tauri_plugin_llama_engine::engine::LlmMessage;
+use plugin_llama_engine::engine::LlmMessage;
 
 const MAX_CONTEXT_CHUNKS: usize = 8;
 

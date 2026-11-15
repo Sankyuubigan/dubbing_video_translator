@@ -11,9 +11,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@my-tauri-plugins/plugin-llama-engine": "file:../cross-app-plugins/tauri-plugin-llama-engine",
-    "@my-tauri-plugins/plugin-logs": "file:../cross-app-plugins/tauri-plugin-logs",
-    "@my-tauri-plugins/plugin-speech": "file:../cross-app-plugins/tauri-plugin-speech",
+    "@my-tauri-plugins/plugin-llama-engine": "file:../cross-app-plugins/plugin-llama-engine",
+    "@my-tauri-plugins/plugin-logs": "file:../cross-app-plugins/plugin-log-collector",
+    "@my-tauri-plugins/plugin-speech": "file:../cross-app-plugins/plugin-speech-gen-engine",
     "@rolldown/binding-win32-x64-msvc": "^1.0.3",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",

@@ -97,10 +97,10 @@ pub fn transcribe(ctx: PipelineContext) -> Result<PipelineContext> {
     // Инициализация движка CrispASR (parakeet, GPU).
     let app = crate::app_handle()
         .ok_or_else(|| anyhow::anyhow!("STT: AppHandle не инициализирован (запуск вне tauri?)"))?;
-    let state = app.state::<tauri_plugin_speech::PluginState>();
+    let state = app.state::<plugin_speech_gen_engine::PluginState>();
     let engine_exe = crate::pick_engine_exe().map_err(|e| anyhow::anyhow!(e))?;
     let model_path = crate::resolve_stt_model().map_err(anyhow::Error::msg)?;
-    let settings = tauri_plugin_speech::SttSettings {
+    let settings = plugin_speech_gen_engine::SttSettings {
         backend: "parakeet".into(),
         model: model_path,
         engine_exe,

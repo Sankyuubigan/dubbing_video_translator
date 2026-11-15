@@ -12,8 +12,8 @@
 use std::path::Path;
 
 use tauri::AppHandle;
-use tauri_plugin_llama_engine::engine::llm_types::GenerationResult;
-use tauri_plugin_llama_engine::engine::{llamacpp_installer, LlmMessage, LlamaEngine, ModelParams};
+use plugin_llama_engine::engine::llm_types::GenerationResult;
+use plugin_llama_engine::engine::{llamacpp_installer, LlmMessage, LlamaEngine, ModelParams};
 
 /// Контекстное окно движка (фиксируется при старте `llama-server.exe`).
 pub const CONTEXT_SIZE: u32 = 8192;
@@ -79,7 +79,7 @@ impl LlmSession {
     /// главной вкладки; выбор хранится в нашем `~/.deedub/config.toml`,
     /// ключ `translation_model` — собственность хоста, не плагина).
     pub fn open(app: &AppHandle) -> Result<Self, String> {
-        let engine_dir = tauri_plugin_llama_engine::get_engine_dir(app);
+        let engine_dir = plugin_llama_engine::get_engine_dir(app);
         if !llamacpp_installer::has_any_installed(&engine_dir) {
             return Err(format!(
                 "Движок LLM не установлен (нет llama-server.exe в {}).\n\
@@ -100,7 +100,7 @@ impl LlmSession {
         // Базовые значения берём из самого GGUF (плагин читает tokenizer.ggml.*),
         // сверху — параметры проекта для перевода.
         let mut params =
-            tauri_plugin_llama_engine::commands::get_model_params(app.clone(), model_path.clone());
+            plugin_llama_engine::commands::get_model_params(app.clone(), model_path.clone());
         // env-override температуры для A/B прогонов (у Index-Translate официальная
         // рекомендация — жадный поиск, temp 0; у Gemma-4-12B — 0.6).
         let temperature = std::env::var("DEEDUB_LLM_TEMP")
